@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# ResolveAI local database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
