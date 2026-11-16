@@ -1,4 +1,5 @@
 
+import logging
 from typing import Annotated
 
 from fastapi import (
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
 from app.db.database import get_db
+from app.ml.predictor import predict_category
 from app.models import User
 from app.schemas.ticket import (
     Priority,
@@ -29,7 +31,10 @@ from app.services.ticket_service import (
     update_ticket,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["Tickets"])
+
 
 
 @router.post(
@@ -43,12 +48,40 @@ def create_ticket_endpoint(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ):
-    """Create a new support ticket for the authenticated agent."""
+    """Create a support ticket with an optional AI category prediction."""
+
+    # Default values in case AI prediction is unavailable.
+    predicted_category = None
+    prediction_confidence = None
+
+    # Step 1: Attempt AI category prediction.
+    try:
+        predicted_category, prediction_confidence = predict_category(
+            ticket_data.description
+        )
+
+        logger.info(
+            "AI predicted ticket category: %s (probability: %.4f)",
+            predicted_category,
+            prediction_confidence,
+        )
+
+    except Exception:
+        # AI failure must never prevent ticket creation.
+        logger.exception(
+            "AI category prediction failed. "
+            "Creating ticket without an AI prediction."
+        )
+
+    # Step 2: Save the ticket regardless of prediction outcome.
+    ticket_fields = ticket_data.model_dump()
 
     ticket = create_ticket(
         db=db,
         creator=current_user,
-        **ticket_data.model_dump(),
+        **ticket_fields,
+        predicted_category=predicted_category,
+        prediction_confidence=prediction_confidence,
     )
 
     return ticket

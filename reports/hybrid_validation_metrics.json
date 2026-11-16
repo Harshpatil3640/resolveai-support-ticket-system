@@ -1,0 +1,125 @@
+{
+    "model": "Word + Character TF-IDF + Logistic Regression",
+    "training_records": 15766,
+    "validation_records": 3942,
+    "categories": [
+        "ACCOUNT",
+        "CANCEL",
+        "CONTACT",
+        "DELIVERY",
+        "FEEDBACK",
+        "INVOICE",
+        "ORDER",
+        "PAYMENT",
+        "REFUND",
+        "SHIPPING",
+        "SUBSCRIPTION"
+    ],
+    "metrics": {
+        "accuracy": 0.9992389649923896,
+        "macro_f1": 0.9994315487245782,
+        "weighted_f1": 0.9992387545673277
+    },
+    "classification_report": {
+        "ACCOUNT": {
+            "precision": 0.997709049255441,
+            "recall": 1.0,
+            "f1-score": 0.9988532110091743,
+            "support": 871.0
+        },
+        "CANCEL": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 152.0
+        },
+        "CONTACT": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 320.0
+        },
+        "DELIVERY": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 265.0
+        },
+        "FEEDBACK": {
+            "precision": 0.996875,
+            "recall": 1.0,
+            "f1-score": 0.9984350547730829,
+            "support": 319.0
+        },
+        "INVOICE": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 293.0
+        },
+        "ORDER": {
+            "precision": 1.0,
+            "recall": 0.9960552268244576,
+            "f1-score": 0.9980237154150198,
+            "support": 507.0
+        },
+        "PAYMENT": {
+            "precision": 1.0,
+            "recall": 0.996875,
+            "f1-score": 0.9984350547730829,
+            "support": 320.0
+        },
+        "REFUND": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 420.0
+        },
+        "SHIPPING": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 315.0
+        },
+        "SUBSCRIPTION": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 160.0
+        },
+        "accuracy": 0.9992389649923896,
+        "macro avg": {
+            "precision": 0.9995076408414036,
+            "recall": 0.999357293347678,
+            "f1-score": 0.9994315487245782,
+            "support": 3942.0
+        },
+        "weighted avg": {
+            "precision": 0.999240920066334,
+            "recall": 0.9992389649923896,
+            "f1-score": 0.9992387545673277,
+            "support": 3942.0
+        }
+    },
+    "vectorizer_configuration": {
+        "word_lowercase": true,
+        "word_strip_accents": "unicode",
+        "word_ngram_range": [
+            1,
+            2
+        ],
+        "character_analyzer": "char_wb",
+        "character_ngram_range": [
+            3,
+            5
+        ],
+        "min_df": 2,
+        "max_df": 0.95,
+        "sublinear_tf": true
+    },
+    "classifier_configuration": {
+        "algorithm": "LogisticRegression",
+        "max_iter": 1000,
+        "random_state": 42
+    }
+}

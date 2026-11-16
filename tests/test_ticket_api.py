@@ -1,4 +1,3 @@
-
 import pytest
 
 from fastapi.testclient import TestClient
@@ -638,6 +637,8 @@ def test_delete_ticket_requires_authentication(
     "ticket_id",
     [0, -1],
 )
+
+
 def test_delete_ticket_rejects_invalid_id(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -650,3 +651,157 @@ def test_delete_ticket_rejects_invalid_id(
         headers=auth_headers,
     )
     assert response.status_code == 422
+
+
+def test_create_ticket_saves_ai_prediction(
+    client: TestClient,
+    db_session: Session,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that an AI prediction is saved separately from final category."""
+
+    def mock_predict_category(description: str) -> tuple[str, float]:
+        assert description == "My card payment was declined."
+        return "PAYMENT", 0.97
+
+    monkeypatch.setattr(
+        "app.api.routes.tickets.predict_category",
+        mock_predict_category,
+    )
+
+    payload = {
+        "title": "Card payment failed",
+        "description": "My card payment was declined.",
+        "priority": "High",
+    }
+
+    response = client.post(
+        "/api/tickets",
+        json=payload,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    assert data["predicted_category"] == "PAYMENT"
+    assert data["prediction_confidence"] == pytest.approx(0.97)
+
+    # AI prediction must not automatically set the final category.
+    assert data["category"] is None
+
+    saved_ticket = db_session.get(Ticket, data["id"])
+
+    assert saved_ticket is not None
+    assert saved_ticket.predicted_category == "PAYMENT"
+    assert saved_ticket.category is None
+    assert saved_ticket.prediction_confidence == pytest.approx(0.97)
+
+
+def test_create_ticket_succeeds_when_ai_prediction_fails(
+    client: TestClient,
+    db_session: Session,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that prediction failure does not prevent ticket creation."""
+
+    def mock_failed_prediction(description: str):
+        raise RuntimeError("ML model unavailable")
+
+    monkeypatch.setattr(
+        "app.api.routes.tickets.predict_category",
+        mock_failed_prediction,
+    )
+
+    payload = {
+        "title": "Unable to complete checkout",
+        "description": "My checkout process is failing.",
+        "priority": "Medium",
+    }
+
+    response = client.post(
+        "/api/tickets",
+        json=payload,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    # Ticket should be created despite prediction failure.
+    assert data["title"] == payload["title"]
+    assert data["predicted_category"] is None
+    assert data["prediction_confidence"] is None
+    assert data["category"] is None
+
+    saved_ticket = db_session.get(Ticket, data["id"])
+
+    assert saved_ticket is not None
+    assert saved_ticket.title == payload["title"]
+    assert saved_ticket.predicted_category is None
+    assert saved_ticket.prediction_confidence is None
+    assert saved_ticket.category is None
+
+
+def test_agent_can_correct_category_without_changing_ai_prediction(
+    client: TestClient,
+    db_session: Session,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that agent corrections preserve the original AI prediction."""
+
+    monkeypatch.setattr(
+        "app.api.routes.tickets.predict_category",
+        lambda description: ("PAYMENT", 0.95),
+    )
+
+    # Step 1: Create ticket with AI prediction.
+    create_response = client.post(
+        "/api/tickets",
+        json={
+            "title": "Order cancellation request",
+            "description": "I want to cancel my recent order.",
+            "priority": "Medium",
+        },
+        headers=auth_headers,
+    )
+
+    assert create_response.status_code == 201
+
+    created_ticket = create_response.json()
+    ticket_id = created_ticket["id"]
+
+    assert created_ticket["predicted_category"] == "PAYMENT"
+    assert created_ticket["category"] is None
+
+    # Step 2: Agent corrects the final category.
+    update_response = client.patch(
+        f"/api/tickets/{ticket_id}",
+        json={
+            "category": "ORDER",
+        },
+        headers=auth_headers,
+    )
+
+    assert update_response.status_code == 200
+
+    updated_ticket = update_response.json()
+
+    # Original AI prediction must remain unchanged.
+    assert updated_ticket["predicted_category"] == "PAYMENT"
+    assert updated_ticket["prediction_confidence"] == pytest.approx(0.95)
+
+    # Human-assigned category should contain the correction.
+    assert updated_ticket["category"] == "ORDER"
+
+    # Step 3: Verify persisted database values.
+    saved_ticket = db_session.get(Ticket, ticket_id)
+
+    assert saved_ticket is not None
+    assert saved_ticket.predicted_category == "PAYMENT"
+    assert saved_ticket.category == "ORDER"

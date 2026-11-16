@@ -225,3 +225,14 @@ __marimo__/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# ResolveAI machine learning datasets
+data/raw/
+data/processed/
+
+# ResolveAI generated ML model artefacts
+# Regenerate locally using ml/evaluate_final_model.py
+models/*.joblib
+
+# Per-record diagnostic reports may contain original dataset text
+reports/*_errors.csv
