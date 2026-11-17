@@ -1,0 +1,437 @@
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="description"
+        content="Manage and track customer support tickets in ResolveAI."
+    >
+
+    <title>Tickets | ResolveAI</title>
+
+    <!-- Bootstrap CSS -->
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+        integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB"
+        crossorigin="anonymous"
+    >
+
+    <!-- Application styles -->
+    <link rel="stylesheet" href="./css/style.css">
+    <link rel="stylesheet" href="./css/dashboard.css">
+    <link rel="stylesheet" href="./css/tickets.css">
+
+</head>
+
+<body class="dashboard-page">
+
+    <div class="dashboard-layout">
+
+        <!-- Sidebar -->
+        <aside class="dashboard-sidebar">
+
+            <div class="sidebar-brand">
+
+                <div class="brand-mark">R</div>
+
+                <span class="brand-name">ResolveAI</span>
+
+            </div>
+
+
+            <div class="sidebar-section-label">
+                WORKSPACE
+            </div>
+
+
+            <nav class="sidebar-navigation">
+
+                <a href="/dashboard.html" class="nav-item">
+                    <span>Overview</span>
+                </a>
+
+                <a href="/tickets.html" class="nav-item active">
+                    <span>Tickets</span>
+                </a>
+
+                <a href="/analytics.html" class="nav-item">
+                    <span>Analytics</span>
+                </a>
+
+            </nav>
+
+
+            <div class="sidebar-footer">
+
+                <div class="sidebar-status">
+
+                    <span class="status-dot"></span>
+
+                    System operational
+
+                </div>
+
+                <span class="sidebar-version">
+                    ResolveAI v0.1.0
+                </span>
+
+            </div>
+
+        </aside>
+
+
+        <!-- Main content -->
+        <main class="dashboard-main">
+
+            <!-- Top navigation -->
+            <header class="dashboard-topbar">
+
+                <div>
+
+                    <p class="dashboard-breadcrumb">
+                        Workspace / Tickets
+                    </p>
+
+                    <h1>Ticket Management</h1>
+
+                </div>
+
+
+                <div class="agent-profile">
+
+                    <div class="agent-avatar" id="agentAvatar">
+                        --
+                    </div>
+
+
+                    <div class="agent-information">
+
+                        <p id="agentName">
+                            Loading profile...
+                        </p>
+
+                        <span id="agentRole">
+                            Support Agent
+                        </span>
+
+                    </div>
+
+
+                    <button
+                        type="button"
+                        class="btn btn-outline-secondary btn-sm"
+                        id="logoutButton"
+                    >
+                        Logout
+                    </button>
+
+                </div>
+
+            </header>
+
+
+            <!-- Tickets content -->
+            <section class="dashboard-content tickets-page-content">
+
+                <!-- Page heading -->
+                <div class="welcome-section">
+
+                    <div>
+
+                        <p class="welcome-label">
+                            SUPPORT OPERATIONS
+                        </p>
+
+                        <h2>All Support Tickets</h2>
+
+                        <p>
+                            Search, track and manage customer support requests.
+                        </p>
+
+                    </div>
+
+                </div>
+
+
+                <!-- Ticket filters -->
+                <section class="ticket-filters">
+
+                    <div class="filter-heading">
+
+                        <div>
+
+                            <h3>Find Tickets</h3>
+
+                            <p>
+                                Search and filter your support requests.
+                            </p>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="filter-grid">
+
+                        <!-- Search -->
+                        <div class="filter-field search-field">
+
+                            <label for="ticketSearchInput">
+                                Search
+                            </label>
+
+                            <input
+                                type="search"
+                                class="form-control"
+                                id="ticketSearchInput"
+                                placeholder="Search title or description..."
+                                maxlength="200"
+                            >
+
+                        </div>
+
+
+                        <!-- Status filter -->
+                        <div class="filter-field">
+
+                            <label for="statusFilter">
+                                Status
+                            </label>
+
+                            <select
+                                class="form-select"
+                                id="statusFilter"
+                            >
+
+                                <option value="">All Statuses</option>
+
+                                <option value="Open">Open</option>
+
+                                <option value="In Progress">
+                                    In Progress
+                                </option>
+
+                                <option value="Resolved">
+                                    Resolved
+                                </option>
+
+                            </select>
+
+                        </div>
+
+
+                        <!-- Priority filter -->
+                        <div class="filter-field">
+
+                            <label for="priorityFilter">
+                                Priority
+                            </label>
+
+                            <select
+                                class="form-select"
+                                id="priorityFilter"
+                            >
+
+                                <option value="">All Priorities</option>
+
+                                <option value="Low">Low</option>
+
+                                <option value="Medium">Medium</option>
+
+                                <option value="High">High</option>
+
+                            </select>
+
+                        </div>
+
+
+                        <!-- Category filter -->
+                        <div class="filter-field">
+
+                            <label for="categoryFilter">
+                                Category
+                            </label>
+
+                            <select
+                                class="form-select"
+                                id="categoryFilter"
+                            >
+
+                                <option value="">All Categories</option>
+
+                                <option value="ACCOUNT">ACCOUNT</option>
+
+                                <option value="CANCEL">CANCEL</option>
+
+                                <option value="CONTACT">CONTACT</option>
+
+                                <option value="DELIVERY">DELIVERY</option>
+
+                                <option value="FEEDBACK">FEEDBACK</option>
+
+                                <option value="INVOICE">INVOICE</option>
+
+                                <option value="ORDER">ORDER</option>
+
+                                <option value="PAYMENT">PAYMENT</option>
+
+                                <option value="REFUND">REFUND</option>
+
+                                <option value="SHIPPING">SHIPPING</option>
+
+                                <option value="SUBSCRIPTION">
+                                    SUBSCRIPTION
+                                </option>
+
+                            </select>
+
+                        </div>
+
+
+                    </div>
+
+
+                    <div class="filter-actions">
+
+                        <button
+                            type="button"
+                            class="btn btn-light"
+                            id="clearFiltersButton"
+                        >
+                            Clear Filters
+                        </button>
+
+                        <a
+                            href="/dashboard.html"
+                            class="btn btn-primary"
+                        >
+                            Back to Dashboard
+                        </a>
+
+                    </div>
+
+                </section>
+
+
+                <!-- Tickets table -->
+                <section class="tickets-section all-tickets-section">
+
+                    <div class="section-heading">
+
+                        <div>
+
+                            <h3>All Tickets</h3>
+
+                            <p id="ticketResultCount">
+                                Loading tickets...
+                            </p>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="table-responsive">
+
+                        <table class="table tickets-table">
+
+                            <thead>
+
+                                <tr>
+
+                                    <th>Ticket ID</th>
+
+                                    <th>Subject</th>
+
+                                    <th>Category</th>
+
+                                    <th>Priority</th>
+
+                                    <th>Status</th>
+
+                                    <th>Created</th>
+
+                                    <th>Action</th>
+
+                                </tr>
+
+                            </thead>
+
+
+                            <tbody id="ticketsTableBody">
+
+                                <tr>
+
+                                    <td colspan="7" class="empty-state">
+                                        Loading support tickets...
+                                    </td>
+
+                                </tr>
+
+                            </tbody>
+
+                        </table>
+
+                    </div>
+
+
+                    <!-- Pagination -->
+                    <div class="ticket-pagination">
+
+                        <span id="paginationInfo">
+                            Page 1
+                        </span>
+
+
+                        <div class="pagination-buttons">
+
+                            <button
+                                type="button"
+                                class="btn btn-outline-secondary btn-sm"
+                                id="previousPageButton"
+                                disabled
+                            >
+                                Previous
+                            </button>
+
+                            <button
+                                type="button"
+                                class="btn btn-primary btn-sm"
+                                id="nextPageButton"
+                                disabled
+                            >
+                                Next
+                            </button>
+
+                        </div>
+
+                    </div>
+
+                </section>
+
+            </section>
+
+        </main>
+
+    </div>
+
+
+    <!-- Bootstrap JavaScript -->
+    <script
+        src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
+        crossorigin="anonymous"
+    ></script>
+
+
+    <!-- Tickets JavaScript -->
+    <script src="./js/tickets.js" defer></script>
+
+</body>
+
+</html>

@@ -1,0 +1,527 @@
+
+/* =========================================
+   RESOLVEAI - DASHBOARD STYLES
+========================================= */
+
+.dashboard-page {
+    min-height: 100vh;
+    background: #f5f7fb;
+    color: #1b2537;
+}
+
+.dashboard-layout {
+    display: flex;
+    min-height: 100vh;
+}
+
+
+/* =========================================
+   SIDEBAR
+========================================= */
+
+.dashboard-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    width: 255px;
+    padding: 30px 20px;
+    background: #17243a;
+    color: #ffffff;
+}
+
+.sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 55px;
+    padding: 0 8px;
+}
+
+.sidebar-brand .brand-mark {
+    flex-shrink: 0;
+}
+
+.sidebar-brand .brand-name {
+    color: #ffffff;
+    font-size: 22px;
+}
+
+.sidebar-section-label {
+    margin: 0 0 15px 12px;
+    color: #8190a8;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+}
+
+.sidebar-navigation {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.nav-item {
+    display: block;
+    padding: 13px 15px;
+    border-radius: 8px;
+    color: #b8c5d8;
+    font-size: 14px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+
+.nav-item:hover {
+    background: #263954;
+    color: #ffffff;
+}
+
+.nav-item.active {
+    background: #4779e8;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: 18px 10px 5px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.sidebar-status {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: #c1ccdc;
+    font-size: 12px;
+}
+
+.sidebar-status .status-dot {
+    flex-shrink: 0;
+}
+
+.sidebar-version {
+    display: block;
+    margin-top: 12px;
+    color: #8190a8;
+    font-size: 11px;
+}
+
+
+/* =========================================
+   MAIN CONTENT
+========================================= */
+
+.dashboard-main {
+    width: calc(100% - 255px);
+    min-height: 100vh;
+    margin-left: 255px;
+}
+
+
+/* =========================================
+   TOP NAVIGATION
+========================================= */
+
+.dashboard-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 105px;
+    padding: 22px 42px;
+    border-bottom: 1px solid #e9edf3;
+    background: #ffffff;
+}
+
+.dashboard-breadcrumb {
+    margin-bottom: 6px;
+    color: #8491a5;
+    font-size: 12px;
+}
+
+.dashboard-topbar h1 {
+    margin: 0;
+    font-size: 25px;
+    font-weight: 700;
+    letter-spacing: -0.6px;
+}
+
+.agent-profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.agent-avatar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    background: #e9efff;
+    color: #4779e8;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.agent-information {
+    min-width: 100px;
+}
+
+.agent-information p {
+    margin: 0 0 3px;
+    color: #273449;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.agent-information span {
+    color: #8491a5;
+    font-size: 11px;
+}
+
+.agent-profile #logoutButton {
+    margin-left: 12px;
+}
+
+
+/* =========================================
+   DASHBOARD CONTENT
+========================================= */
+
+.dashboard-content {
+    padding: 38px 42px;
+}
+
+.welcome-section {
+    margin-bottom: 30px;
+}
+
+.welcome-label {
+    margin-bottom: 9px;
+    color: #4779e8;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.6px;
+}
+
+.welcome-section h2 {
+    margin-bottom: 8px;
+    font-size: 27px;
+    font-weight: 700;
+    letter-spacing: -0.8px;
+}
+
+.welcome-section p:last-child {
+    margin-bottom: 0;
+    color: #8491a5;
+    font-size: 14px;
+}
+
+
+/* =========================================
+   STATISTICS CARDS
+========================================= */
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 20px;
+    margin-bottom: 35px;
+}
+
+.stat-card {
+    padding: 24px;
+    border: 1px solid #e9edf3;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 3px 12px rgba(25, 45, 80, 0.025);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 22px rgba(25, 45, 80, 0.07);
+}
+
+.stat-card-heading {
+    color: #718096;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.stat-card-value {
+    margin: 15px 0 8px;
+    color: #1b2537;
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -1px;
+}
+
+.stat-card-description {
+    margin: 0;
+    color: #9aa5b5;
+    font-size: 11px;
+}
+
+
+/* =========================================
+   RECENT TICKETS SECTION
+========================================= */
+
+.tickets-section {
+    overflow: hidden;
+    margin-bottom: 28px;
+    padding: 25px;
+    border: 1px solid #e9edf3;
+    border-radius: 12px;
+    background: #ffffff;
+}
+
+.section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+    margin-bottom: 25px;
+}
+
+.section-heading h3 {
+    margin-bottom: 6px;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.section-heading p {
+    margin: 0;
+    color: #8b97a8;
+    font-size: 12px;
+}
+
+.section-heading .btn {
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.tickets-table {
+    min-width: 650px;
+    margin-bottom: 0;
+}
+
+.tickets-table thead th {
+    padding: 15px 12px;
+    border-bottom: 1px solid #e9edf3;
+    background: #f8faff;
+    color: #7d899d;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.tickets-table tbody td {
+    padding: 18px 12px;
+    border-bottom: 1px solid #edf0f5;
+    color: #46536a;
+    font-size: 12px;
+    vertical-align: middle;
+}
+
+.tickets-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.empty-state {
+    padding: 35px 12px !important;
+    color: #9aa5b5 !important;
+    text-align: center;
+}
+
+
+/* =========================================
+   AI INFORMATION PANEL
+========================================= */
+
+.ai-information {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 24px;
+    border: 1px solid #dce6ff;
+    border-radius: 12px;
+    background: #eef3ff;
+}
+
+.ai-information-mark {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: #4779e8;
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 800;
+}
+
+.ai-information h3 {
+    margin-bottom: 7px;
+    color: #243b66;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.ai-information p {
+    margin: 0;
+    color: #637796;
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+
+/* =========================================
+   RESPONSIVE DESIGN - TABLETS
+========================================= */
+
+@media (max-width: 1100px) {
+
+    .stats-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .dashboard-content {
+        padding: 30px;
+    }
+
+    .dashboard-topbar {
+        padding: 20px 30px;
+    }
+
+}
+
+
+/* =========================================
+   RESPONSIVE DESIGN - MOBILE
+========================================= */
+
+@media (max-width: 768px) {
+
+    .dashboard-sidebar {
+        position: relative;
+        width: 100%;
+        min-height: auto;
+        padding: 15px 18px;
+    }
+
+    .dashboard-layout {
+        flex-direction: column;
+    }
+
+    .sidebar-brand {
+        margin-bottom: 18px;
+    }
+
+    .sidebar-navigation {
+        flex-direction: row;
+        flex-wrap: wrap;
+    }
+
+    .sidebar-section-label,
+    .sidebar-footer {
+        display: none;
+    }
+
+    .nav-item {
+        padding: 10px 12px;
+        font-size: 12px;
+    }
+
+    .dashboard-main {
+        width: 100%;
+        margin-left: 0;
+    }
+
+    .dashboard-topbar {
+        align-items: flex-start;
+        gap: 15px;
+        padding: 22px 20px;
+    }
+
+    .dashboard-topbar h1 {
+        font-size: 21px;
+    }
+
+    .agent-profile {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+    }
+
+    .agent-information {
+        display: none;
+    }
+
+    .agent-profile #logoutButton {
+        margin-left: 0;
+    }
+
+    .dashboard-content {
+        padding: 25px 20px;
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+    }
+
+    .stat-card {
+        padding: 18px;
+    }
+
+    .stat-card-value {
+        font-size: 27px;
+    }
+
+    .section-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .tickets-section {
+        padding: 18px;
+    }
+
+}
+
+@media (max-width: 420px) {
+
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .dashboard-topbar {
+        flex-direction: column;
+    }
+
+    .agent-profile {
+        justify-content: flex-start;
+    }
+
+    .agent-information {
+        display: block;
+    }
+
+    .ai-information {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+}

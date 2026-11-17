@@ -1,0 +1,399 @@
+
+/* =========================================
+   RESOLVEAI - GLOBAL STYLES
+========================================= */
+
+:root {
+    --primary: #4779e8;
+    --primary-dark: #3565d4;
+    --navy: #17243a;
+    --navy-light: #263954;
+    --text-primary: #1b2537;
+    --text-secondary: #718096;
+    --border: #e2e8f0;
+    --background: #f7f9fc;
+    --white: #ffffff;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    min-height: 100%;
+}
+
+body {
+    margin: 0;
+    font-family: Inter, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    color: var(--text-primary);
+    background: var(--background);
+}
+
+
+/* =========================================
+   LOGIN PAGE LAYOUT
+========================================= */
+
+.login-page {
+    min-height: 100vh;
+}
+
+.login-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-height: 100vh;
+}
+
+
+/* =========================================
+   LEFT BRANDING SECTION
+========================================= */
+
+.login-visual {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    overflow: hidden;
+    min-height: 100vh;
+    padding: 48px 9%;
+    color: var(--white);
+
+    background:
+        radial-gradient(
+            circle at 85% 15%,
+            rgba(71, 121, 232, 0.35),
+            transparent 35%
+        ),
+        linear-gradient(
+            145deg,
+            #17243a 0%,
+            #1c2d49 55%,
+            #263c5e 100%
+        );
+}
+
+.login-visual::after {
+    content: "";
+    position: absolute;
+    width: 420px;
+    height: 420px;
+    right: -180px;
+    bottom: -180px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 50%;
+    pointer-events: none;
+}
+
+.brand-lockup {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.brand-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background: var(--primary);
+    color: var(--white);
+    font-size: 24px;
+    font-weight: 800;
+}
+
+.brand-name {
+    font-size: 23px;
+    font-weight: 700;
+    letter-spacing: -0.7px;
+}
+
+.visual-copy {
+    position: relative;
+    z-index: 1;
+    max-width: 560px;
+    margin: 65px 0;
+}
+
+.eyebrow {
+    margin-bottom: 18px;
+    color: #8eafff;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+
+.visual-copy h1 {
+    margin-bottom: 24px;
+    font-size: clamp(38px, 4.2vw, 62px);
+    font-weight: 700;
+    line-height: 1.13;
+    letter-spacing: -2px;
+}
+
+.visual-description {
+    max-width: 430px;
+    color: #bdc9dc;
+    font-size: 16px;
+    line-height: 1.8;
+}
+
+.visual-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #bdc9dc;
+    font-size: 13px;
+}
+
+.status-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #53d6a0;
+    box-shadow: 0 0 12px rgba(83, 214, 160, 0.5);
+}
+
+
+/* =========================================
+   RIGHT LOGIN SECTION
+========================================= */
+
+.login-panel {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px;
+    background: var(--white);
+}
+
+.login-card {
+    width: 100%;
+    max-width: 430px;
+}
+
+.mobile-brand {
+    display: none;
+}
+
+.login-heading {
+    margin-bottom: 36px;
+}
+
+.login-heading .eyebrow {
+    margin-bottom: 12px;
+    color: var(--primary);
+}
+
+.login-heading h2 {
+    margin-bottom: 12px;
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -0.8px;
+}
+
+.login-description {
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.7;
+}
+
+
+/* =========================================
+   FORM ELEMENTS
+========================================= */
+
+.form-label {
+    margin-bottom: 9px;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.form-control {
+    min-height: 50px;
+    padding: 12px 15px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    color: var(--text-primary);
+    font-size: 14px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-control::placeholder {
+    color: #a0aabc;
+}
+
+.form-control:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 4px rgba(71, 121, 232, 0.12);
+}
+
+
+/* =========================================
+   LOGIN BUTTON
+========================================= */
+
+.login-button {
+    min-height: 50px;
+    border: none;
+    border-radius: 9px;
+    background: var(--primary);
+    font-size: 15px;
+    font-weight: 600;
+    transition: background 0.2s, transform 0.2s;
+}
+
+.login-button:hover {
+    background: var(--primary-dark);
+    transform: translateY(-1px);
+}
+
+.login-button:active {
+    transform: translateY(0);
+}
+
+.login-button:disabled {
+    background: #829fe0;
+    cursor: not-allowed;
+}
+
+
+/* =========================================
+   LOGIN FOOTER
+========================================= */
+
+.login-footnote {
+    margin-top: 28px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+    text-align: center;
+}
+
+
+/* =========================================
+   RESPONSIVE DESIGN - TABLETS
+========================================= */
+
+@media (max-width: 992px) {
+
+    .login-layout {
+        grid-template-columns: 0.9fr 1.1fr;
+    }
+
+    .login-visual {
+        padding: 40px 8%;
+    }
+
+    .login-panel {
+        padding: 36px;
+    }
+
+    .visual-copy h1 {
+        font-size: 42px;
+    }
+
+}
+
+
+/* =========================================
+   RESPONSIVE DESIGN - MOBILE
+========================================= */
+
+@media (max-width: 768px) {
+
+    .login-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .login-visual {
+        min-height: auto;
+        padding: 28px 26px 32px;
+    }
+
+    .brand-lockup {
+        display: none;
+    }
+
+    .visual-copy {
+        margin: 25px 0 0;
+    }
+
+    .visual-copy .eyebrow {
+        margin-bottom: 12px;
+    }
+
+    .visual-copy h1 {
+        margin-bottom: 14px;
+        font-size: 36px;
+        letter-spacing: -1px;
+    }
+
+    .visual-description {
+        margin-bottom: 0;
+        font-size: 14px;
+    }
+
+    .visual-footer {
+        display: none;
+    }
+
+    .login-panel {
+        padding: 35px 26px 45px;
+    }
+
+    .login-card {
+        max-width: 480px;
+    }
+
+    .mobile-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 38px;
+    }
+
+    .mobile-brand .brand-mark {
+        width: 36px;
+        height: 36px;
+        font-size: 20px;
+    }
+
+    .mobile-brand .brand-name {
+        color: var(--navy);
+        font-size: 20px;
+    }
+
+    .login-heading h2 {
+        font-size: 27px;
+    }
+
+}
+
+
+/* =========================================
+   SMALL MOBILE SCREENS
+========================================= */
+
+@media (max-width: 380px) {
+
+    .visual-copy h1 {
+        font-size: 30px;
+    }
+
+    .login-panel {
+        padding-right: 20px;
+        padding-left: 20px;
+    }
+
+    .login-heading h2 {
+        font-size: 24px;
+    }
+
+}

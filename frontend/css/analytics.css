@@ -1,0 +1,439 @@
+/* =========================================
+   RESOLVEAI - ANALYTICS PAGE
+========================================= */
+
+.analytics-content {
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+}
+
+.analytics-section {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.analytics-summary-grid {
+    margin-bottom: 0;
+}
+
+/* =========================================
+   ANALYTICS CHART GRID
+========================================= */
+
+.analytics-charts-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+}
+
+.analytics-panel {
+    min-width: 0;
+    padding: 24px;
+    background: #ffffff;
+    border: 1px solid #e9edf3;
+    border-radius: 14px;
+    box-shadow: 0 3px 12px rgba(25, 42, 70, 0.035);
+}
+
+.analytics-panel-heading {
+    margin-bottom: 22px;
+}
+
+.analytics-panel-heading h4 {
+    margin: 0 0 7px;
+    color: #17243a;
+    font-size: 16px;
+    font-weight: 650;
+}
+
+.analytics-panel-heading p {
+    margin: 0;
+    color: #8490a3;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.analytics-chart-content {
+    min-height: 230px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 15px;
+}
+
+.analytics-loading,
+.analytics-empty-state {
+    margin: 0;
+    padding: 24px 12px;
+    color: #8995a7;
+    font-size: 13px;
+    text-align: center;
+}
+
+/* =========================================
+   CSS BAR CHARTS
+========================================= */
+
+.analytics-bar-list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.analytics-bar-row {
+    display: grid;
+    grid-template-columns: minmax(90px, 115px) minmax(50px, 1fr) 36px;
+    align-items: center;
+    gap: 10px;
+}
+
+.analytics-bar-label {
+    overflow: hidden;
+    color: #536176;
+    font-size: 12px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.analytics-bar-track {
+    height: 9px;
+    overflow: hidden;
+    background: #edf1f6;
+    border-radius: 20px;
+}
+
+.analytics-bar-fill {
+    height: 100%;
+    min-width: 0;
+    background: #6479dc;
+    border-radius: 20px;
+    transition: width 0.35s ease;
+}
+
+.analytics-bar-value {
+    color: #26364d;
+    font-size: 12px;
+    font-weight: 650;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+/* =========================================
+   DAILY TICKET TREND
+========================================= */
+
+.analytics-trend-chart {
+    width: 100%;
+    min-height: 210px;
+    overflow: visible;
+}
+
+.analytics-trend-chart text {
+    fill: #8793a5;
+    font-family: inherit;
+    font-size: 10px;
+}
+
+.analytics-trend-line {
+    fill: none;
+    stroke: #6479dc;
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.analytics-trend-area {
+    fill: rgba(100, 121, 220, 0.10);
+}
+
+.analytics-trend-point {
+    fill: #ffffff;
+    stroke: #6479dc;
+    stroke-width: 2;
+}
+
+/* =========================================
+   MODEL INFORMATION
+========================================= */
+
+.model-information-panel {
+    margin-bottom: 0;
+}
+
+.model-information-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    gap: 24px;
+}
+
+.model-information-grid > div {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.model-info-label {
+    color: #8995a7;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.model-information-grid strong {
+    overflow-wrap: anywhere;
+    color: #24344b;
+    font-size: 15px;
+    font-weight: 650;
+}
+
+/* =========================================
+   MODEL METRIC CARDS
+========================================= */
+
+.model-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+}
+
+.model-metric-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 23px;
+    background: #ffffff;
+    border: 1px solid #e9edf3;
+    border-radius: 14px;
+    box-shadow: 0 3px 12px rgba(25, 42, 70, 0.035);
+}
+
+.model-metric-label {
+    color: #78869a;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.model-metric-value {
+    color: #536bca;
+    font-size: 30px;
+    font-weight: 750;
+    letter-spacing: -0.8px;
+    font-variant-numeric: tabular-nums;
+}
+
+.model-metric-card p {
+    margin: 0;
+    color: #929daf;
+    font-size: 12px;
+}
+
+/* =========================================
+   CLASSIFICATION REPORT TABLE
+========================================= */
+
+.analytics-table {
+    margin: 0;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.analytics-table thead th {
+    padding: 13px 15px;
+    background: #f7f9fc;
+    border-bottom: 1px solid #e9edf3;
+    color: #718096;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.045em;
+}
+
+.analytics-table tbody td {
+    padding: 14px 15px;
+    border-bottom: 1px solid #eef1f5;
+    color: #48566c;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.analytics-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.analytics-table tbody td:first-child {
+    color: #26364d;
+    font-weight: 650;
+}
+
+.analytics-table tbody tr:hover {
+    background: #fafbfe;
+}
+
+/* =========================================
+   CONFUSION MATRIX
+========================================= */
+
+.confusion-matrix-container {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.confusion-matrix {
+    width: max-content;
+    min-width: 100%;
+    border-collapse: separate;
+    border-spacing: 3px;
+    text-align: center;
+}
+
+.confusion-matrix th,
+.confusion-matrix td {
+    min-width: 55px;
+    height: 42px;
+    padding: 8px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.confusion-matrix thead th,
+.confusion-matrix .matrix-row-label {
+    background: #f2f5fa;
+    color: #59677c;
+    font-weight: 700;
+}
+
+.confusion-matrix .matrix-axis-label {
+    color: #7d8a9e;
+    background: transparent;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.confusion-matrix .matrix-correct {
+    background: #e3f3eb;
+    color: #24734e;
+}
+
+.confusion-matrix .matrix-error {
+    background: #fce8e8;
+    color: #b33e3e;
+    font-weight: 750;
+}
+
+.confusion-matrix .matrix-zero {
+    background: #fafbfc;
+    color: #c1c9d4;
+}
+
+/* =========================================
+   EVALUATION DISCLAIMER
+========================================= */
+
+.analytics-disclaimer {
+    padding: 19px 22px;
+    background: #f5f7fb;
+    border: 1px solid #e7ebf3;
+    border-radius: 12px;
+}
+
+.analytics-disclaimer strong {
+    display: block;
+    margin-bottom: 6px;
+    color: #384a65;
+    font-size: 13px;
+}
+
+.analytics-disclaimer p {
+    margin: 0;
+    color: #738198;
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+/* =========================================
+   RESPONSIVE DESIGN
+========================================= */
+
+@media (max-width: 1100px) {
+
+    .analytics-charts-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .model-information-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .model-information-grid > div:first-child {
+        grid-column: 1 / -1;
+    }
+
+}
+
+@media (max-width: 768px) {
+
+    .analytics-content {
+        gap: 23px;
+    }
+
+    .analytics-panel {
+        padding: 18px;
+    }
+
+    .model-metrics-grid {
+        grid-template-columns: 1fr;
+        gap: 13px;
+    }
+
+    .model-metric-card {
+        padding: 19px;
+    }
+
+    .model-metric-value {
+        font-size: 26px;
+    }
+
+    .model-information-grid {
+        grid-template-columns: 1fr;
+        gap: 18px;
+    }
+
+    .model-information-grid > div:first-child {
+        grid-column: auto;
+    }
+
+    .analytics-bar-row {
+        grid-template-columns: 90px minmax(40px, 1fr) 30px;
+        gap: 7px;
+    }
+
+}
+
+@media (max-width: 480px) {
+
+    .analytics-panel {
+        padding: 15px;
+    }
+
+    .analytics-bar-label {
+        font-size: 11px;
+    }
+
+    .analytics-bar-row {
+        grid-template-columns: 82px minmax(35px, 1fr) 27px;
+    }
+
+    .analytics-table thead th,
+    .analytics-table tbody td {
+        padding: 11px;
+        font-size: 11px;
+    }
+
+}
