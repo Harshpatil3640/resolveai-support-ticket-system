@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="description"
+        content="ResolveAI support operations and machine learning analytics."
+    >
+
+    <title>Analytics | ResolveAI</title>
+
+    <!-- Bootstrap CSS -->
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+        integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB"
+        crossorigin="anonymous"
+    >
+
+    <!-- Shared application styles -->
+    <link rel="stylesheet" href="./css/style.css">
+
+    <!-- Dashboard layout styles -->
+    <link rel="stylesheet" href="./css/dashboard.css">
+
+    <!-- Analytics-specific styles -->
+    <link rel="stylesheet" href="./css/analytics.css">
+</head>
+
+<body class="dashboard-page">
+
+    <div class="dashboard-layout">
+
+        <!-- Sidebar -->
+        <aside class="dashboard-sidebar">
+
+            <div class="sidebar-brand">
+                <div class="brand-mark">R</div>
+                <span class="brand-name">ResolveAI</span>
+            </div>
+
+            <div class="sidebar-section-label">
+                WORKSPACE
+            </div>
+
+            <nav class="sidebar-navigation">
+
+                <a href="/dashboard.html" class="nav-item">
+                    <span>Overview</span>
+                </a>
+
+                <a href="/tickets.html" class="nav-item">
+                    <span>Tickets</span>
+                </a>
+
+                <a href="/analytics.html" class="nav-item active">
+                    <span>Analytics</span>
+                </a>
+
+            </nav>
+
+            <div class="sidebar-footer">
+
+                <div class="sidebar-status">
+                    <span class="status-dot"></span>
+                    System operational
+                </div>
+
+                <span class="sidebar-version">
+                    ResolveAI v0.1.0
+                </span>
+
+            </div>
+
+        </aside>
+
+
+        <!-- Main content -->
+        <main class="dashboard-main">
+
+            <!-- Top navigation -->
+            <header class="dashboard-topbar">
+
+                <div>
+                    <p class="dashboard-breadcrumb">
+                        Workspace / Analytics
+                    </p>
+
+                    <h1>Analytics</h1>
+                </div>
+
+                <div class="agent-profile">
+
+                    <div class="agent-avatar" id="agentAvatar">
+                        --
+                    </div>
+
+                    <div class="agent-information">
+
+                        <p id="agentName">
+                            Loading profile...
+                        </p>
+
+                        <span id="agentRole">
+                            Support Agent
+                        </span>
+
+                    </div>
+
+                    <button
+                        type="button"
+                        class="btn btn-outline-secondary btn-sm"
+                        id="logoutButton"
+                    >
+                        Logout
+                    </button>
+
+                </div>
+
+            </header>
+
+
+            <!-- Analytics content -->
+            <section class="dashboard-content analytics-content">
+
+                <div class="welcome-section">
+
+                    <div>
+                        <p class="welcome-label">
+                            BUSINESS INTELLIGENCE
+                        </p>
+
+                        <h2>Support Operations Overview</h2>
+
+                        <p>
+                            Monitor ticket activity, customer support trends
+                            and AI classification performance.
+                        </p>
+                    </div>
+
+                </div>
+
+
+                <!-- Page messages -->
+                <div
+                    id="analyticsPageAlert"
+                    class="alert d-none"
+                    role="alert"
+                ></div>
+
+
+                <!-- Operational summary -->
+                <section
+                    class="stats-grid analytics-summary-grid"
+                    aria-label="Ticket statistics"
+                >
+
+                    <article class="stat-card">
+                        <div class="stat-card-heading">
+                            Total Tickets
+                        </div>
+
+                        <div
+                            class="stat-card-value"
+                            id="analyticsTotalTickets"
+                        >
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            All registered tickets
+                        </p>
+                    </article>
+
+
+                    <article class="stat-card">
+                        <div class="stat-card-heading">
+                            Open Tickets
+                        </div>
+
+                        <div
+                            class="stat-card-value"
+                            id="analyticsOpenTickets"
+                        >
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Awaiting resolution
+                        </p>
+                    </article>
+
+
+                    <article class="stat-card">
+                        <div class="stat-card-heading">
+                            In Progress
+                        </div>
+
+                        <div
+                            class="stat-card-value"
+                            id="analyticsProgressTickets"
+                        >
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Currently being handled
+                        </p>
+                    </article>
+
+
+                    <article class="stat-card">
+                        <div class="stat-card-heading">
+                            Resolved Tickets
+                        </div>
+
+                        <div
+                            class="stat-card-value"
+                            id="analyticsResolvedTickets"
+                        >
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Successfully completed
+                        </p>
+                    </article>
+
+                </section>
+
+
+                <!-- Ticket operations analytics -->
+                <section class="analytics-section">
+
+                    <div class="section-heading">
+                        <div>
+                            <h3>Ticket Operations</h3>
+
+                            <p>
+                                Distribution and trends based on actual
+                                ticket records.
+                            </p>
+                        </div>
+                    </div>
+
+
+                    <div class="analytics-charts-grid">
+
+                        <!-- Confirmed categories -->
+                        <article class="analytics-panel">
+
+                            <div class="analytics-panel-heading">
+                                <h4>Confirmed Categories</h4>
+
+                                <p>
+                                    Agent-confirmed ticket categories
+                                </p>
+                            </div>
+
+                            <div
+                                id="confirmedCategoryChart"
+                                class="analytics-chart-content"
+                            >
+                                <p class="analytics-loading">
+                                    Loading category distribution...
+                                </p>
+                            </div>
+
+                        </article>
+
+
+                        <!-- AI predictions -->
+                        <article class="analytics-panel">
+
+                            <div class="analytics-panel-heading">
+                                <h4>AI Predictions</h4>
+
+                                <p>
+                                    Categories suggested by the ML model
+                                </p>
+                            </div>
+
+                            <div
+                                id="aiPredictionChart"
+                                class="analytics-chart-content"
+                            >
+                                <p class="analytics-loading">
+                                    Loading AI prediction distribution...
+                                </p>
+                            </div>
+
+                        </article>
+
+
+                        <!-- Priority distribution -->
+                        <article class="analytics-panel">
+
+                            <div class="analytics-panel-heading">
+                                <h4>Priority Distribution</h4>
+
+                                <p>
+                                    Tickets grouped by priority
+                                </p>
+                            </div>
+
+                            <div
+                                id="priorityChart"
+                                class="analytics-chart-content"
+                            >
+                                <p class="analytics-loading">
+                                    Loading priority distribution...
+                                </p>
+                            </div>
+
+                        </article>
+
+
+                        <!-- Ticket trends -->
+                        <article class="analytics-panel">
+
+                            <div class="analytics-panel-heading">
+                                <h4>Daily Ticket Trends</h4>
+
+                                <p>
+                                    Tickets grouped by actual creation date
+                                </p>
+                            </div>
+
+                            <div
+                                id="ticketTrendChart"
+                                class="analytics-chart-content"
+                            >
+                                <p class="analytics-loading">
+                                    Loading ticket trends...
+                                </p>
+                            </div>
+
+                        </article>
+
+                    </div>
+
+                </section>
+
+
+                <!-- Machine learning model performance -->
+                <section
+                    class="analytics-section"
+                    id="model-performance"
+                >
+
+                    <div class="section-heading">
+                        <div>
+                            <h3>AI Model Performance</h3>
+
+                            <p>
+                                Evaluation results from the held-out
+                                Bitext test dataset.
+                            </p>
+                        </div>
+                    </div>
+
+
+                    <!-- Model information -->
+                    <article class="analytics-panel model-information-panel">
+
+                        <div class="analytics-panel-heading">
+                            <h4>Model Information</h4>
+                        </div>
+
+                        <div class="model-information-grid">
+
+                            <div>
+                                <span class="model-info-label">
+                                    Model
+                                </span>
+
+                                <strong id="modelName">
+                                    Loading...
+                                </strong>
+                            </div>
+
+                            <div>
+                                <span class="model-info-label">
+                                    Training Records
+                                </span>
+
+                                <strong id="trainingRecords">
+                                    --
+                                </strong>
+                            </div>
+
+                            <div>
+                                <span class="model-info-label">
+                                    Test Records
+                                </span>
+
+                                <strong id="testRecords">
+                                    --
+                                </strong>
+                            </div>
+
+                        </div>
+
+                    </article>
+
+
+                    <!-- Overall ML metrics -->
+                    <div class="model-metrics-grid">
+
+                        <article class="model-metric-card">
+
+                            <span class="model-metric-label">
+                                Accuracy
+                            </span>
+
+                            <strong
+                                class="model-metric-value"
+                                id="modelAccuracy"
+                            >
+                                --
+                            </strong>
+
+                            <p>
+                                Overall correct predictions
+                            </p>
+
+                        </article>
+
+
+                        <article class="model-metric-card">
+
+                            <span class="model-metric-label">
+                                Macro F1-Score
+                            </span>
+
+                            <strong
+                                class="model-metric-value"
+                                id="modelMacroF1"
+                            >
+                                --
+                            </strong>
+
+                            <p>
+                                Average F1 across categories
+                            </p>
+
+                        </article>
+
+
+                        <article class="model-metric-card">
+
+                            <span class="model-metric-label">
+                                Weighted F1-Score
+                            </span>
+
+                            <strong
+                                class="model-metric-value"
+                                id="modelWeightedF1"
+                            >
+                                --
+                            </strong>
+
+                            <p>
+                                F1 weighted by category support
+                            </p>
+
+                        </article>
+
+                    </div>
+
+
+                    <!-- Classification report -->
+                    <article class="analytics-panel">
+
+                        <div class="analytics-panel-heading">
+                            <h4>Category-Level Classification Report</h4>
+
+                            <p>
+                                Precision, recall, F1-score and test support
+                                for each category.
+                            </p>
+                        </div>
+
+                        <div class="table-responsive">
+
+                            <table
+                                class="table analytics-table"
+                                id="categoryMetricsTable"
+                            >
+
+                                <thead>
+                                    <tr>
+                                        <th>Category</th>
+                                        <th>Precision</th>
+                                        <th>Recall</th>
+                                        <th>F1-Score</th>
+                                        <th>Support</th>
+                                    </tr>
+                                </thead>
+
+                                <tbody id="categoryMetricsTableBody">
+
+                                    <tr>
+                                        <td
+                                            colspan="5"
+                                            class="analytics-loading"
+                                        >
+                                            Loading classification report...
+                                        </td>
+                                    </tr>
+
+                                </tbody>
+
+                            </table>
+
+                        </div>
+
+                    </article>
+
+
+                    <!-- Confusion matrix -->
+                    <article class="analytics-panel confusion-matrix-panel">
+
+                        <div class="analytics-panel-heading">
+                            <h4>Confusion Matrix</h4>
+
+                            <p>
+                                Actual categories compared with predicted
+                                categories. Rows represent actual classes;
+                                columns represent predicted classes.
+                            </p>
+                        </div>
+
+                        <div
+                            id="confusionMatrixContainer"
+                            class="table-responsive confusion-matrix-container"
+                        >
+                            <p class="analytics-loading">
+                                Loading confusion matrix...
+                            </p>
+                        </div>
+
+                    </article>
+
+
+                    <!-- Evaluation disclaimer -->
+                    <div class="analytics-disclaimer">
+
+                        <strong>Evaluation note</strong>
+
+                        <p>
+                            These metrics represent the model's performance
+                            on the held-out Bitext test dataset. Performance
+                            on real-world customer tickets may differ.
+                        </p>
+
+                    </div>
+
+                </section>
+
+            </section>
+
+        </main>
+
+    </div>
+
+
+    <!-- Bootstrap JavaScript -->
+    <script
+        src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
+        crossorigin="anonymous"
+    ></script>
+
+
+    <!-- Analytics JavaScript -->
+    <script src="./js/analytics.js" defer></script>
+
+</body>
+
+</html>

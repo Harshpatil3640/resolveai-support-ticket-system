@@ -1,0 +1,457 @@
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta name="description" content="ResolveAI support ticket management dashboard.">
+
+    <title>Dashboard | ResolveAI</title>
+
+    <!-- Bootstrap CSS -->
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+        integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB"
+        crossorigin="anonymous"
+    >
+
+    <!-- Existing application styles -->
+    <link rel="stylesheet" href="./css/style.css">
+
+    <!-- Dashboard-specific styles -->
+    <link rel="stylesheet" href="./css/dashboard.css">
+</head>
+
+<body class="dashboard-page">
+
+    <div class="dashboard-layout">
+
+        <!-- Sidebar -->
+        <aside class="dashboard-sidebar">
+
+            <div class="sidebar-brand">
+                <div class="brand-mark">R</div>
+                <span class="brand-name">ResolveAI</span>
+            </div>
+
+            <div class="sidebar-section-label">
+                WORKSPACE
+            </div>
+
+            <nav class="sidebar-navigation">
+
+                <a href="/dashboard.html" class="nav-item active">
+                    <span>Overview</span>
+                </a>
+
+                <a href="/tickets.html" class="nav-item">
+                    <span>Tickets</span>
+                </a>
+
+                <a href="/analytics.html" class="nav-item">
+                    <span>Analytics</span>
+                </a>
+
+            </nav>
+
+            <div class="sidebar-footer">
+
+                <div class="sidebar-status">
+                    <span class="status-dot"></span>
+                    System operational
+                </div>
+
+                <span class="sidebar-version">
+                    ResolveAI v0.1.0
+                </span>
+
+            </div>
+
+        </aside>
+
+
+        <!-- Main content -->
+        <main class="dashboard-main">
+
+            <!-- Top navigation -->
+            <header class="dashboard-topbar">
+
+                <div>
+                    <p class="dashboard-breadcrumb">
+                        Workspace / Overview
+                    </p>
+
+                    <h1>Dashboard</h1>
+                </div>
+
+                <div class="agent-profile">
+
+                    <div class="agent-avatar" id="agentAvatar">
+                        --
+                    </div>
+
+                    <div class="agent-information">
+
+                        <p id="agentName">
+                            Loading profile...
+                        </p>
+
+                        <span id="agentRole">
+                            Support Agent
+                        </span>
+
+                    </div>
+
+                    <button
+                        type="button"
+                        class="btn btn-outline-secondary btn-sm"
+                        id="logoutButton"
+                    >
+                        Logout
+                    </button>
+
+                </div>
+
+            </header>
+
+
+            <!-- Dashboard content -->
+            <section class="dashboard-content">
+
+                <div class="welcome-section">
+
+                    <div>
+                        <p class="welcome-label">WORKSPACE OVERVIEW</p>
+
+                        <h2>Welcome back, <span id="welcomeName">Agent</span>!</h2>
+
+                        <p>
+                            Here's an overview of your support operations.
+                        </p>
+                    </div>
+
+                </div>
+
+
+                <!-- Statistics cards -->
+                <section class="stats-grid" aria-label="Ticket statistics">
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Total Tickets
+                        </div>
+
+                        <div class="stat-card-value" id="totalTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            All registered tickets
+                        </p>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Open Tickets
+                        </div>
+
+                        <div class="stat-card-value" id="openTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Awaiting resolution
+                        </p>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            In Progress
+                        </div>
+
+                        <div class="stat-card-value" id="progressTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Currently being handled
+                        </p>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Resolved Tickets
+                        </div>
+
+                        <div class="stat-card-value" id="resolvedTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Successfully completed
+                        </p>
+
+                    </article>
+
+                </section>
+
+
+                <!-- Recent tickets -->
+                <section
+                    class="tickets-section"
+                    id="tickets"
+                    aria-labelledby="tickets-heading"
+                >
+
+                    <div class="section-heading">
+
+                        <div>
+                            <h3 id="tickets-heading">
+                                Recent Tickets
+                            </h3>
+
+                            <p>
+                                Latest customer support requests
+                            </p>
+                        </div>
+
+                        <button
+                            type="button"
+                            class="btn btn-primary"
+                            id="createTicketButton"
+                        >
+                            + Create Ticket
+                        </button>
+
+                    </div>
+
+
+                    <div class="table-responsive">
+
+                        <table class="table tickets-table">
+
+                            <thead>
+                                <tr>
+                                    <th>Ticket</th>
+                                    <th>Subject</th>
+                                    <th>Category</th>
+                                    <th>Priority</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+
+                            <tbody id="recentTickets">
+
+                                <tr>
+                                    <td colspan="5" class="empty-state">
+                                        Ticket data will appear here.
+                                    </td>
+                                </tr>
+
+                            </tbody>
+
+                        </table>
+
+                    </div>
+
+                </section>
+
+
+                <!-- AI information -->
+                <section
+                    class="ai-information"
+                    id="analytics"
+                >
+
+                    <div class="ai-information-mark">
+                        AI
+                    </div>
+
+                    <div>
+                        <h3>Intelligent Ticket Classification</h3>
+
+                        <p>
+                            ResolveAI automatically suggests ticket categories
+                            using its machine-learning classification model.
+                        </p>
+                    </div>
+
+                </section>
+
+            </section>
+        </main>
+
+    </div>
+
+    <!-- CREATE TICKET MODAL -->
+    <div
+        class="modal fade"
+        id="createTicketModal"
+        tabindex="-1"
+        aria-labelledby="createTicketModalLabel"
+        aria-hidden="true"
+    >
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+
+                <div class="modal-header">
+
+                    <div>
+                        <h5 class="modal-title" id="createTicketModalLabel">
+                            Create Support Ticket
+                        </h5>
+
+                        <p class="text-secondary small mb-0">
+                            Enter the customer's issue details.
+                        </p>
+                    </div>
+
+                    <button
+                        type="button"
+                        class="btn-close"
+                        data-bs-dismiss="modal"
+                        aria-label="Close"
+                    ></button>
+
+                </div>
+
+                <form id="createTicketForm">
+
+                    <div class="modal-body">
+
+                        <div
+                            id="createTicketAlert"
+                            class="alert d-none"
+                            role="alert"
+                        ></div>
+
+                        <div class="mb-3">
+
+                            <label for="requesterName" class="form-label">
+                                Customer Name
+                            </label>
+
+                            <input
+                                type="text"
+                                class="form-control"
+                                id="requesterName"
+                                name="requester_name"
+                                maxlength="100"
+                                placeholder="Enter customer name"
+                            >
+
+                        </div>
+
+                        <div class="mb-3">
+
+                            <label for="ticketTitle" class="form-label">
+                                Ticket Title *
+                            </label>
+
+                            <input
+                                type="text"
+                                class="form-control"
+                                id="ticketTitle"
+                                name="title"
+                                minlength="3"
+                                maxlength="200"
+                                placeholder="Briefly describe the issue"
+                                required
+                            >
+
+                        </div>
+
+                        <div class="mb-3">
+
+                            <label for="ticketDescription" class="form-label">
+                                Description *
+                            </label>
+
+                            <textarea
+                                class="form-control"
+                                id="ticketDescription"
+                                name="description"
+                                rows="4"
+                                minlength="5"
+                                placeholder="Describe the customer's issue in detail"
+                                required
+                            ></textarea>
+
+                        </div>
+
+                        <div class="mb-3">
+
+                            <label for="ticketPriority" class="form-label">
+                                Priority
+                            </label>
+
+                            <select
+                                class="form-select"
+                                id="ticketPriority"
+                                name="priority"
+                            >
+                                <option value="Low">Low</option>
+                                <option value="Medium" selected>Medium</option>
+                                <option value="High">High</option>
+                            </select>
+
+                        </div>
+
+                        <p class="text-secondary small mb-0">
+                            AI will automatically suggest a category after
+                            ticket submission.
+                        </p>
+
+                    </div>
+
+                    <div class="modal-footer">
+
+                        <button
+                            type="button"
+                            class="btn btn-light"
+                            data-bs-dismiss="modal"
+                        >
+                            Cancel
+                        </button>
+
+                        <button
+                            type="submit"
+                            class="btn btn-primary"
+                            id="saveTicketButton"
+                        >
+                            Create Ticket
+                        </button>
+
+                    </div>
+
+                </form>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JavaScript -->
+    <script
+        src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
+        crossorigin="anonymous"
+    ></script>
+
+    <!-- Dashboard JavaScript -->
+    <script src="./js/dashboard.js" defer></script>
+
+</body>
+</html>
