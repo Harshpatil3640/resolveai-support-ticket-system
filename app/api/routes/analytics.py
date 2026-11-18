@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import require_agent_or_admin
 from app.db.database import get_db
 from app.models import User
 from app.schemas.analytics import (
@@ -27,7 +27,7 @@ router = APIRouter(tags=["Analytics"])
 )
 def get_analytics_summary(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(get_current_user)],
+    _: Annotated[User, Depends(require_agent_or_admin)],
 ) -> TicketSummary:
     """Retrieve overall support ticket statistics."""
 
@@ -43,7 +43,7 @@ def get_analytics_summary(
 )
 def get_analytics_operations(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(get_current_user)],
+    _: Annotated[User, Depends(require_agent_or_admin)],
 ) -> OperationsAnalytics:
     """Retrieve ticket distribution and trend analytics."""
 
@@ -54,7 +54,7 @@ def get_analytics_operations(
 
 @router.get("/model-performance", response_model=ModelPerformance)
 def read_model_performance(
-    current_user: Annotated[User, Depends(get_current_user)],
+    _: Annotated[User, Depends(require_agent_or_admin)],
 ):
     try:
         report = get_model_performance()

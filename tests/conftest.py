@@ -1,13 +1,22 @@
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 
 import pytest
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.roles import UserRole
+from app.core.security import hash_password
 from app.db.base import Base
+from app.db.database import get_db
+from app.main import app
+from app.models import User
+
+
+TEST_PASSWORD = "StrongPassword123!"
 
 
 @pytest.fixture
@@ -43,3 +52,142 @@ def db_session() -> Generator[Session, None, None]:
     finally:
         Base.metadata.drop_all(bind=test_engine)
         test_engine.dispose()
+
+
+@pytest.fixture
+def client(db_session: Session) -> Generator[TestClient, None, None]:
+    """Create a test client using an isolated test database."""
+
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+    app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture
+def create_user(db_session: Session) -> Callable[..., User]:
+    """Factory that persists a user with the given email and role.
+
+    Passing ``role=None`` leaves the model's default role in place.
+    """
+
+    def _create_user(
+        *,
+        email: str,
+        role: str | None,
+        name: str = "Test User",
+        password: str = TEST_PASSWORD,
+    ) -> User:
+        user = User(
+            name=name,
+            email=email,
+            password_hash=hash_password(password),
+        )
+
+        if role is not None:
+            user.role = role
+
+        db_session.add(user)
+        db_session.commit()
+        db_session.refresh(user)
+
+        return user
+
+    return _create_user
+
+
+@pytest.fixture
+def login_headers(client: TestClient) -> Callable[..., dict[str, str]]:
+    """Factory that logs a user in and returns bearer auth headers."""
+
+    def _login_headers(
+        email: str,
+        password: str = TEST_PASSWORD,
+    ) -> dict[str, str]:
+        response = client.post(
+            "/api/auth/login",
+            data={"username": email, "password": password},
+        )
+
+        assert response.status_code == 200
+
+        token = response.json()["access_token"]
+
+        return {"Authorization": f"Bearer {token}"}
+
+    return _login_headers
+
+
+@pytest.fixture
+def admin_user(create_user: Callable[..., User]) -> User:
+    return create_user(
+        email="admin@example.test",
+        role=UserRole.ADMIN.value,
+        name="Test Admin",
+    )
+
+
+@pytest.fixture
+def admin_headers(
+    admin_user: User,
+    login_headers: Callable[..., dict[str, str]],
+) -> dict[str, str]:
+    return login_headers(admin_user.email)
+
+
+@pytest.fixture
+def agent_user(create_user: Callable[..., User]) -> User:
+    """Support agent created with the model's default role ("agent")."""
+
+    return create_user(
+        email="agent@example.test",
+        role=None,
+        name="Test Agent",
+    )
+
+
+@pytest.fixture
+def agent_headers(
+    agent_user: User,
+    login_headers: Callable[..., dict[str, str]],
+) -> dict[str, str]:
+    return login_headers(agent_user.email)
+
+
+@pytest.fixture
+def customer_user(create_user: Callable[..., User]) -> User:
+    return create_user(
+        email="customer@example.test",
+        role=UserRole.CUSTOMER.value,
+        name="Test Customer",
+    )
+
+
+@pytest.fixture
+def customer_headers(
+    customer_user: User,
+    login_headers: Callable[..., dict[str, str]],
+) -> dict[str, str]:
+    return login_headers(customer_user.email)
+
+
+@pytest.fixture
+def second_customer_user(create_user: Callable[..., User]) -> User:
+    return create_user(
+        email="customer2@example.test",
+        role=UserRole.CUSTOMER.value,
+        name="Second Customer",
+    )
+
+
+@pytest.fixture
+def second_customer_headers(
+    second_customer_user: User,
+    login_headers: Callable[..., dict[str, str]],
+) -> dict[str, str]:
+    return login_headers(second_customer_user.email)

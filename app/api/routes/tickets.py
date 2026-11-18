@@ -12,7 +12,12 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import (
+    require_admin,
+    require_agent_or_admin,
+    require_any_role,
+)
+from app.core.roles import UserRole
 from app.db.database import get_db
 from app.ml.predictor import predict_category
 from app.models import User
@@ -35,6 +40,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Tickets"])
 
+# Roles that may access every ticket in the shared support queue.
+STAFF_ROLES: frozenset[UserRole] = frozenset(
+    {UserRole.ADMIN, UserRole.AGENT}
+)
+
+
+def _ticket_owner_scope(user: User) -> int | None:
+    """Return the creator ID a user's ticket access is restricted to.
+
+    Staff (admin/agent) see all tickets, so no restriction (``None``).
+    Everyone else is restricted to tickets they created. This fails
+    closed: any role that is not explicitly staff is scoped to its own
+    tickets.
+    """
+
+    if user.role in STAFF_ROLES:
+        return None
+
+    return user.id
+
 
 
 @router.post(
@@ -46,7 +71,7 @@ router = APIRouter(tags=["Tickets"])
 def create_ticket_endpoint(
     ticket_data: TicketCreate,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_any_role)],
 ):
     """Create a support ticket with an optional AI category prediction."""
 
@@ -94,7 +119,7 @@ def create_ticket_endpoint(
 )
 def list_tickets_endpoint(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_any_role)],
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     ticket_status: Status | None = Query(
@@ -121,6 +146,7 @@ def list_tickets_endpoint(
         priority=priority,
         category=category,
         search=search,
+        created_by_user_id=_ticket_owner_scope(current_user),
     )
 
     return tickets
@@ -134,13 +160,18 @@ def list_tickets_endpoint(
 def retrieve_ticket_endpoint(
     ticket_id: Annotated[int, Path(ge=1)],
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_any_role)],
 ) -> TicketRead:
-    """Retrieve an individual support ticket by its ID."""
+    """Retrieve an individual support ticket by its ID.
+
+    Customers only see their own tickets; a ticket owned by someone
+    else returns the same 404 as a nonexistent ticket.
+    """
 
     ticket = get_ticket_by_id(
         db=db,
         ticket_id=ticket_id,
+        created_by_user_id=_ticket_owner_scope(current_user),
     )
 
     if ticket is None:
@@ -162,7 +193,7 @@ def update_ticket_endpoint(
     ticket_id: Annotated[int, Path(ge=1)],
     ticket_data: TicketUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(get_current_user)],
+    _: Annotated[User, Depends(require_agent_or_admin)],
 ) -> TicketRead:
     """Update permitted fields of an existing support ticket."""
 
@@ -197,7 +228,7 @@ def update_ticket_endpoint(
 def delete_ticket_endpoint(
     ticket_id: Annotated[int, Path(ge=1)],
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(get_current_user)],
+    _: Annotated[User, Depends(require_admin)],
 ) -> None:
     """Delete an existing support ticket."""
 

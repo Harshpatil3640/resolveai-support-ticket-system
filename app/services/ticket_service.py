@@ -65,10 +65,25 @@ def create_ticket(
 def get_ticket_by_id(
     db: Session,
     ticket_id: int,
+    *,
+    created_by_user_id: int | None = None,
 ) -> Ticket | None:
-    """Retrieve a ticket using its primary key."""
+    """Retrieve a ticket using its primary key.
 
-    return db.get(Ticket, ticket_id)
+    When ``created_by_user_id`` is supplied, the ticket is only returned
+    if it was created by that user; otherwise ``None`` is returned, so
+    a non-owned ticket is indistinguishable from a missing one.
+    """
+
+    if created_by_user_id is None:
+        return db.get(Ticket, ticket_id)
+
+    statement = select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.created_by_user_id == created_by_user_id,
+    )
+
+    return db.scalars(statement).first()
 
 
 def get_tickets(
@@ -80,10 +95,20 @@ def get_tickets(
     category: str | None = None,
     priority: str | None = None,
     search: str | None = None,
+    created_by_user_id: int | None = None,
 ) -> list[Ticket]:
-    """Retrieve tickets with optional filtering and pagination."""
+    """Retrieve tickets with optional filtering and pagination.
+
+    ``created_by_user_id`` restricts results to tickets created by that
+    user (used to scope customer access).
+    """
 
     statement = select(Ticket)
+
+    if created_by_user_id is not None:
+        statement = statement.where(
+            Ticket.created_by_user_id == created_by_user_id
+        )
 
     if status is not None:
         statement = statement.where(Ticket.status == status)
