@@ -188,3 +188,91 @@ def test_delete_ticket(
     delete_ticket(db_session, ticket)
 
     assert get_ticket_by_id(db_session, ticket_id) is None
+
+
+@pytest.fixture
+def other_user(db_session: Session) -> User:
+    """Create a second user to verify creator scoping."""
+
+    user = User(
+        name="Other Customer",
+        email="other@example.test",
+        password_hash="test-hash",
+        role="customer",
+    )
+
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    return user
+
+
+def test_get_tickets_filters_by_creator(
+    db_session: Session,
+    test_user: User,
+    other_user: User,
+) -> None:
+
+    own = create_ticket(
+        db_session,
+        creator=test_user,
+        title="Payment failed",
+        description="Payment was unsuccessful.",
+        category="Billing",
+    )
+
+    create_ticket(
+        db_session,
+        creator=other_user,
+        title="Payment failed too",
+        description="Another unsuccessful payment.",
+        category="Billing",
+    )
+
+    results = get_tickets(
+        db_session,
+        category="Billing",
+        search="payment",
+        created_by_user_id=test_user.id,
+    )
+
+    assert [ticket.id for ticket in results] == [own.id]
+
+    # Omitting the creator filter preserves the unscoped behaviour.
+    assert len(get_tickets(db_session, category="Billing")) == 2
+
+
+def test_get_ticket_by_id_scoped_to_creator(
+    db_session: Session,
+    test_user: User,
+    other_user: User,
+) -> None:
+
+    ticket = create_ticket(
+        db_session,
+        creator=test_user,
+        title="Login problem",
+        description="Unable to log in.",
+    )
+
+    scoped = get_ticket_by_id(
+        db_session,
+        ticket.id,
+        created_by_user_id=test_user.id,
+    )
+
+    assert scoped is not None
+    assert scoped.id == ticket.id
+
+    assert get_ticket_by_id(
+        db_session,
+        ticket.id,
+        created_by_user_id=other_user.id,
+    ) is None
+
+    assert get_ticket_by_id(
+        db_session,
+        9999,
+        created_by_user_id=test_user.id,
+    ) is None

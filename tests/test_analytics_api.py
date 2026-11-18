@@ -1,69 +1,35 @@
+from collections.abc import Callable
+
 import pytest
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.core.security import hash_password
-from app.db.database import get_db
-from app.main import app
 from app.models import Ticket, User
 from app.services.ticket_service import create_ticket
 
 
-@pytest.fixture
-def client(db_session: Session):
-    """Create a test client using an isolated test database."""
+# ``client``, role users and their auth headers come from conftest.py.
 
-    def override_get_db():
-        yield db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    with TestClient(app) as test_client:
-        yield test_client
-
-    app.dependency_overrides.pop(get_db, None)
+ANALYTICS_ENDPOINTS = [
+    "/api/analytics/summary",
+    "/api/analytics/operations",
+    "/api/analytics/model-performance",
+]
 
 
 @pytest.fixture
-def api_user(db_session: Session) -> User:
-    """Create a user for analytics API tests."""
+def api_user(agent_user: User) -> User:
+    """Support agent used by the original analytics API tests."""
 
-    user = User(
-        name="Analytics Test Agent",
-        email="analytics@example.test",
-        password_hash=hash_password("StrongPassword123!"),
-    )
-
-    db_session.add(user)
-    db_session.commit()
-    db_session.refresh(user)
-
-    return user
+    return agent_user
 
 
 @pytest.fixture
-def auth_headers(
-    client: TestClient,
-    api_user: User,
-) -> dict[str, str]:
-    """Authenticate the agent and return authorization headers."""
+def auth_headers(agent_headers: dict[str, str]) -> dict[str, str]:
+    """Authorization headers for the support agent."""
 
-    login_response = client.post(
-        "/api/auth/login",
-        data={
-            "username": "analytics@example.test",
-            "password": "StrongPassword123!",
-        },
-    )
-
-    assert login_response.status_code == 200
-
-    token = login_response.json()["access_token"]
-
-    return {
-        "Authorization": f"Bearer {token}"
-    }
+    return agent_headers
 
 
 
@@ -416,3 +382,65 @@ def test_model_performance_returns_report(client, auth_headers):
         len(row) == 11
         for row in data["confusion_matrix"]["values"]
     )
+
+# ---------------------------------------------------------------------------
+# Role-based access control
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("endpoint", ANALYTICS_ENDPOINTS)
+def test_admin_can_access_analytics(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    endpoint: str,
+) -> None:
+    response = client.get(endpoint, headers=admin_headers)
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("endpoint", ANALYTICS_ENDPOINTS)
+def test_agent_can_access_analytics(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    endpoint: str,
+) -> None:
+    response = client.get(endpoint, headers=agent_headers)
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("endpoint", ANALYTICS_ENDPOINTS)
+def test_customer_cannot_access_analytics(
+    client: TestClient,
+    customer_headers: dict[str, str],
+    endpoint: str,
+) -> None:
+    response = client.get(endpoint, headers=customer_headers)
+
+    assert response.status_code == 403
+    assert "total_tickets" not in response.text
+
+
+@pytest.mark.parametrize("endpoint", ANALYTICS_ENDPOINTS)
+def test_unauthenticated_cannot_access_analytics(
+    client: TestClient,
+    endpoint: str,
+) -> None:
+    response = client.get(endpoint)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("endpoint", ANALYTICS_ENDPOINTS)
+def test_unknown_role_cannot_access_analytics(
+    client: TestClient,
+    create_user: Callable[..., User],
+    login_headers: Callable[..., dict[str, str]],
+    endpoint: str,
+) -> None:
+    user = create_user(email="unknown@example.test", role="superuser")
+
+    response = client.get(endpoint, headers=login_headers(user.email))
+
+    assert response.status_code == 403
