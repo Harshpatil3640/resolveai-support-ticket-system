@@ -369,6 +369,10 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+Then set up the database. For a brand-new database run `alembic upgrade head`.
+If you already have a `resolveai.db` from before Alembic was introduced, follow
+[Database Setup and Migrations](#database-setup-and-migrations) instead.
+
 ### 4. Download the dataset
 
 The dataset is not included in this repository.
@@ -433,6 +437,38 @@ Open the API documentation:
 http://127.0.0.1:8000/docs
 
 Authenticate using an agent account configured in your application, then use the protected ticket endpoints.
+
+## Database Setup and Migrations
+
+The schema is managed with Alembic migrations in `alembic/versions/`.
+
+Brand-new database:
+
+```cmd
+alembic upgrade head
+```
+
+Existing database created before Alembic (back it up first):
+
+```cmd
+python -m app.db.check_baseline
+python -m app.db.check_baseline --stamp
+alembic upgrade head
+```
+
+The check is read-only and refuses to stamp if the schema differs from the
+baseline. Inspect the state with `alembic current` and create new migrations
+with `alembic revision --autogenerate -m "message"`.
+
+Migrations are always an explicit step; nothing runs them automatically.
+`python -m app.scripts.create_agent` requires the database to already be at
+the Alembic head revision, with exactly the schema the migrations produce, and
+stops, without changing anything, if it is not.
+SQL generated offline with `--sql` skips the baseline's safety check, so never
+apply it to an existing database.
+
+Full procedure, exit codes and troubleshooting:
+[docs/database-migrations.md](docs/database-migrations.md).
 
 ## Running Tests
 

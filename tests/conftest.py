@@ -1,6 +1,10 @@
 
+import secrets
 from collections.abc import Callable, Generator
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
+import jwt
 import pytest
 
 from fastapi.testclient import TestClient
@@ -8,6 +12,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import ALGORITHM, SECRET_KEY
 from app.core.roles import UserRole
 from app.core.security import hash_password
 from app.db.base import Base
@@ -191,3 +196,38 @@ def second_customer_headers(
     login_headers: Callable[..., dict[str, str]],
 ) -> dict[str, str]:
     return login_headers(second_customer_user.email)
+
+
+@pytest.fixture
+def forge_access_token() -> Callable[..., str]:
+    """Factory for correctly signed access tokens with custom claims.
+
+    Starts from a valid claim set; keyword arguments override claims and
+    ``omit`` removes them (e.g. to build a legacy token without a
+    ``token_version`` claim).
+    """
+
+    def _forge(
+        *,
+        subject: str,
+        omit: tuple[str, ...] = (),
+        **overrides: Any,
+    ) -> str:
+        now = datetime.now(timezone.utc)
+
+        claims: dict[str, Any] = {
+            "sub": subject,
+            "iat": now,
+            "exp": now + timedelta(minutes=5),
+            "jti": secrets.token_urlsafe(16),
+            "token_type": "access",
+            "token_version": 0,
+        }
+        claims.update(overrides)
+
+        for claim in omit:
+            claims.pop(claim, None)
+
+        return jwt.encode(claims, SECRET_KEY, algorithm=ALGORITHM)
+
+    return _forge

@@ -2,11 +2,13 @@
 from datetime import datetime, timezone
 
 import jwt
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.security import (
+    TOKEN_VERSION_CLAIM,
     decode_access_token,
     verify_password,
 )
@@ -75,7 +77,88 @@ def get_active_user_from_token(
     if user is None or not user.is_active:
         return None
 
+    # Tokens issued before the user's sessions were invalidated carry an
+    # older version and are rejected. The role is deliberately NOT read
+    # from the token; it is always loaded from the database.
+    if payload[TOKEN_VERSION_CLAIM] != user.token_version:
+        return None
+
     return user
+
+
+class UserNotFoundError(LookupError):
+    """Raised when an operation targets a user row that does not exist."""
+
+
+def invalidate_user_sessions(
+    db: Session,
+    user: User,
+    *,
+    commit: bool = True,
+) -> int:
+    """Invalidate every access token previously issued to ``user``.
+
+    Increments ``token_version`` with a single atomic SQL UPDATE, so
+    concurrent invalidations cannot be lost, and returns the resulting
+    version. ``user.token_version`` is updated to match.
+
+    Intended for password resets and account deactivation. Role changes
+    do not need it: roles are re-read from the database on each request.
+
+    Transaction semantics:
+
+    * ``commit=True`` (default): the function owns the session's current
+      transaction. On success it commits it; on ANY failure (SQL error,
+      missing user, commit error) it rolls it back and re-raises. Pending
+      work the caller added to the session is committed or rolled back
+      with it.
+    * ``commit=False``: the caller owns the transaction. The increment is
+      executed but never committed or rolled back here, and exceptions
+      propagate unchanged, so the caller decides whether to commit or roll
+      back. Other pending changes in the session (including unflushed
+      changes to ``user`` itself) are left untouched.
+
+    Raises:
+        UserNotFoundError: no row exists for ``user.id``. Nothing was
+            changed by this function.
+        sqlalchemy.exc.SQLAlchemyError: the UPDATE or the commit failed.
+    """
+
+    try:
+        result = db.execute(
+            update(User)
+            .where(User.id == user.id)
+            .values(token_version=User.token_version + 1)
+            # The attribute is reloaded explicitly below.
+            .execution_options(synchronize_session=False)
+        )
+
+        if result.rowcount == 0:
+            raise UserNotFoundError(
+                f"Cannot invalidate sessions: user {user.id} does not exist."
+            )
+
+        # Read back the incremented value inside the same transaction.
+        # Only token_version is refreshed, so any other unflushed changes
+        # the caller made to this user are preserved.
+        db.refresh(user, attribute_names=["token_version"])
+        new_version = user.token_version
+
+        if commit:
+            db.commit()
+
+    except Exception:
+        if commit:
+            db.rollback()
+        raise
+
+    if commit:
+        # commit() expires loaded attributes. Record the committed version
+        # on the instance so it is available without another query (and
+        # even after the session is closed).
+        set_committed_value(user, "token_version", new_version)
+
+    return new_version
 
 
 def revoke_access_token(

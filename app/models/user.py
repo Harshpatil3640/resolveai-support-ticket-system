@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -50,6 +50,15 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
+        nullable=False,
+    )
+
+    # Embedded in every access token. Incrementing it invalidates all
+    # tokens previously issued to this user (e.g. after a password reset).
+    token_version: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
         nullable=False,
     )
 
