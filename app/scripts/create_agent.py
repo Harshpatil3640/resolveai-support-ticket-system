@@ -1,20 +1,40 @@
 
+import sys
 from getpass import getpass
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
-from app.db.base import Base
 from app.db.database import engine
+from app.db.migrations import DatabaseNotAtHeadError, ensure_database_at_head
 from app.models import User
+
+
+def require_migrated_database() -> None:
+    """Stop unless the database this script writes to is at Alembic head.
+
+    The check is read-only. This script never runs migrations: migrating
+    is an explicit operator step (see docs/database-migrations.md).
+    """
+
+    try:
+        ensure_database_at_head(Path(engine.url.database))
+    except DatabaseNotAtHeadError as error:
+        print(f"Cannot create an agent. {error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
 
 def create_agent() -> None:
     """Create an initial support agent interactively."""
 
     print("\n=== ResolveAI Support Agent Creation ===\n")
+
+    # Verify the schema before asking for any input, in particular the
+    # password, so nothing is collected for a database that cannot be used.
+    require_migrated_database()
 
     name = input("Enter agent name: ").strip()
     email = input("Enter agent email: ").strip().lower()
@@ -33,9 +53,6 @@ def create_agent() -> None:
     if password != confirm_password:
         print("Passwords do not match.")
         return
-
-    # Ensure all registered models have their tables.
-    Base.metadata.create_all(bind=engine)
 
     with Session(engine) as db:
 

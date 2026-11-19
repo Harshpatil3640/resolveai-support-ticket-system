@@ -120,6 +120,8 @@ Locations: `app/db/` and `app/models/`
 
 SQLAlchemy will manage database interactions.
 
+The schema is versioned with Alembic migrations (`alembic/versions/`). See [database-migrations.md](database-migrations.md) for setup and upgrade procedures.
+
 The first version will use SQLite. Database access will be separated from business logic so the project can be adapted to PostgreSQL later.
 
 ### 4.5 Machine-learning module
@@ -164,6 +166,8 @@ The `users` table will contain:
 - `email`: Unique login identifier
 - `password_hash`: Secure password hash
 - `role`: Authorised application role
+- `is_active`: Whether the account may authenticate
+- `token_version`: Session version embedded in every access token; incrementing it invalidates all previously issued tokens for the user
 - `created_at`: Account creation timestamp
 
 Passwords must never be stored in plain text.
@@ -312,6 +316,6 @@ Before implementation is complete, we must verify:
 - The actual source labels and the final category mapping.
 - Compatibility between the chosen Python version and package versions.
 - The authentication and session strategy.
-- Database migration requirements.
+- Database migration requirements. (Resolved: Alembic, with a baseline revision for pre-existing databases.)
 - How the trained model and evaluation report will be generated from a fresh clone.
 - The security configuration required for any public deployment.
