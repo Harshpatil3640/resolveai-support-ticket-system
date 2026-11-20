@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.db.errors import roll_back_keeping_primary
 from app.models import Ticket, User
 
 
@@ -20,12 +21,21 @@ ALLOWED_UPDATE_FIELDS = {
 
 
 def _commit_changes(db: Session) -> None:
-    """Commit a transaction and roll back if it fails."""
+    """Commit a transaction and roll back if it fails.
+
+    The commit's failure is always the exception raised; if the rollback
+    also fails, that is recorded on it as a secondary failure
+    (``app.db.errors.rollback_failure_of``) rather than replacing it.
+    """
     try:
         db.commit()
-    except Exception:
-        db.rollback()
-        raise
+    except Exception as caught:
+        primary = roll_back_keeping_primary(db, caught)
+
+        if primary is caught:
+            raise
+
+        raise primary from None
 
 
 def create_ticket(

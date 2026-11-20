@@ -3,17 +3,26 @@
 import sqlite3
 import tempfile
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import closing
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from alembic.script.revision import RevisionError
+from alembic.util import CommandError
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
+from app.db.errors import (
+    describe_database_error,
+    describe_driver_error,
+    describe_rollback_failure,
+    rollback_failure_of,
+    separate_rollback_failure,
+)
 from app.db.schema_inspection import (
     ALEMBIC_VERSION_TABLE,
     Schema,
@@ -21,6 +30,7 @@ from app.db.schema_inspection import (
     describe_schema,
     read_only_connection,
     read_only_engine,
+    summarise_schema_differences,
 )
 
 
@@ -143,12 +153,110 @@ def upgrade_to_head(
     )
 
 
+class MigrationDatabaseError(CommandError):
+    """A migration command failed because of a database error.
+
+    Raised by ``alembic/env.py`` in place of the SQLAlchemy error, without
+    chaining it. The message is built only from fixed text and
+    allow-listed diagnostics, so Alembic's command line can show it as its
+    usual "FAILED: ..." line and exit non-zero without printing the SQL,
+    parameters, the driver's message or a traceback.
+    """
+
+
+def migration_database_error(error: SQLAlchemyError) -> MigrationDatabaseError:
+    """Build a safe ``MigrationDatabaseError`` for a failed migration run.
+
+    The original failure is reported first, even if SQLAlchemy raised its
+    own failed rollback in its place; a rollback failure follows.
+    """
+
+    primary, rollback_failure = separate_rollback_failure(error)
+    rollback_failure = rollback_failure_of(primary) or rollback_failure
+
+    message = (
+        f"Database error during migration ({describe_database_error(primary)})."
+    )
+
+    if rollback_failure is not None:
+        message += (
+            " The rollback also failed "
+            f"({describe_rollback_failure(rollback_failure)})."
+        )
+
+    return MigrationDatabaseError(
+        f"{message} Details are hidden because database errors can contain "
+        f"sensitive data (see {MIGRATION_GUIDE})."
+    )
+
+
+UNRESOLVED_REVISION_MESSAGE = (
+    "Alembic could not resolve a recorded database revision. "
+    "Revision details are hidden."
+)
+
+
+class MigrationRevisionError(CommandError):
+    """A revision recorded in the database could not be resolved.
+
+    Raised by ``alembic/env.py`` in place of Alembic's own revision error,
+    without chaining it. Alembic quotes the unresolvable value verbatim
+    ("Can't locate revision identified by '...'"), and a value read from
+    ``alembic_version`` is database content that may contain secrets or
+    terminal control characters, so only fixed text is shown.
+    """
+
+
+def migration_revision_error(
+    error: CommandError,
+    read_recorded_revisions: Callable[[], Iterable[object]],
+    script: ScriptDirectory,
+) -> MigrationRevisionError | None:
+    """Return a safe replacement for a revision error, or ``None``.
+
+    Alembic reports every revision problem as a ``CommandError`` chained
+    from a ``RevisionError`` (``ResolutionError``, ``MultipleHeads``, ...),
+    and its message may quote any revision involved, including the
+    database's. ``None`` (keep Alembic's error) is returned only when the
+    error is not a revision error, or when every recorded revision is
+    exactly one of this code's revision IDs, so any revision text in the
+    message came from the migration scripts or the operator's own command
+    (for example a mistyped ``alembic upgrade <revision>``).
+
+    The recorded revisions are read only here, after a failure: there is
+    no check beforehand, so ``alembic stamp --purge`` can always replace an
+    unknown value. If they cannot be read, the fixed-text error is used.
+    """
+
+    if not isinstance(error.__cause__, RevisionError):
+        return None
+
+    try:
+        known = {revision.revision for revision in script.walk_revisions()}
+        trusted = all(value in known for value in read_recorded_revisions())
+    except Exception:  # noqa: BLE001 - any failure falls back to fixed text
+        trusted = False
+
+    if trusted:
+        return None
+
+    return MigrationRevisionError(
+        f"{UNRESOLVED_REVISION_MESSAGE} See {MIGRATION_GUIDE}."
+    )
+
+
 def _script_directory() -> ScriptDirectory:
     """Load the migration scripts; no database is opened."""
 
     return ScriptDirectory.from_config(
         get_alembic_config(configure_logging=False)
     )
+
+
+def known_revision_ids() -> set[str]:
+    """Every revision ID defined by this code's migration scripts."""
+
+    return {revision.revision for revision in _script_directory().walk_revisions()}
 
 
 # ---------------------------------------------------------------------------
@@ -220,12 +328,22 @@ def _join(revisions: Iterable[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" + ("" if number == 1 else "s")
+
+
 def _check_recorded_revisions(
     database_file: Path,
     recorded: list[str] | None,
     script: ScriptDirectory,
 ) -> None:
-    """Accept only version rows that are exactly the code's head(s)."""
+    """Accept only version rows that are exactly the code's head(s).
+
+    Messages never contain text read from the database. Revision values
+    are shown only once they are known to equal one of this code's own
+    revision IDs, and are then taken from the migration scripts; unknown
+    or duplicated values are reported only as counts.
+    """
 
     heads = set(script.get_heads())
     head_text = _join(heads)
@@ -251,22 +369,30 @@ def _check_recorded_revisions(
 
     if duplicates:
         raise InconsistentMigrationRecordsError(
-            f"Database {database_file} records revision {_join(duplicates)} "
-            f"more than once ({', '.join(recorded)}); its migration records "
-            "are corrupt. " + _DO_NOT_MIGRATE
+            f"Database {database_file} records the same revision more than "
+            f"once ({_count(len(recorded), 'row')} in its "
+            f"{ALEMBIC_VERSION_TABLE} table, "
+            f"{_count(len(duplicates), 'duplicated value')}); its migration "
+            "records are corrupt. " + _DO_NOT_MIGRATE
         )
 
     known = {revision.revision for revision in script.walk_revisions()}
-    unknown = sorted(set(recorded) - known)
+    unknown = set(recorded) - known
 
     if unknown:
         raise UnknownRevisionError(
-            f"Database {database_file} records revision {_join(unknown)}, "
-            "which this code does not know (it may have been migrated by a "
-            f"newer version). This code requires revision {head_text}. Use "
-            "code that matches the database; do not run migrations or "
-            f"provision users with this code (see {MIGRATION_GUIDE})."
+            f"Database {database_file} records "
+            f"{_count(len(unknown), 'revision value')} that this code does "
+            "not know (it may have been migrated by a newer version). This "
+            f"code requires revision {head_text}. Use code that matches the "
+            "database; do not run migrations or provision users with this "
+            f"code (see {MIGRATION_GUIDE})."
         )
+
+    # Every recorded value is now one of this code's revision IDs. Display
+    # the IDs from the migration scripts, never the strings read from the
+    # database (they are equal, but only the scripts' copies are trusted).
+    recorded_text = _join(revision for revision in known if revision in recorded)
 
     if len(recorded) > 1 and set(recorded) != heads:
         if len(heads) == 1:
@@ -279,13 +405,13 @@ def _check_recorded_revisions(
 
         raise InvalidRevisionSetError(
             f"Database {database_file} records several revisions "
-            f"({_join(recorded)}), {reason}. Its migration records are "
+            f"({recorded_text}), {reason}. Its migration records are "
             "inconsistent. " + _DO_NOT_MIGRATE
         )
 
     if set(recorded) != heads:
         raise PendingMigrationsError(
-            f"Database {database_file} is at revision {_join(recorded)}, but "
+            f"Database {database_file} is at revision {recorded_text}, but "
             f"this code requires revision {head_text}. Back up the database "
             "and apply the pending migrations explicitly with "
             f"'alembic upgrade head' (see {MIGRATION_GUIDE})."
@@ -293,7 +419,12 @@ def _check_recorded_revisions(
 
 
 def _check_schema_matches_heads(database_file: Path, head_text: str) -> None:
-    """Compare the live schema with the schema the migrations produce."""
+    """Compare the live schema with the schema the migrations produce.
+
+    Detection uses ``compare_schemas`` (unchanged); the message and the
+    exception's ``differences`` use ``summarise_schema_differences`` so
+    that no database-provided names, definitions or SQL are shown.
+    """
 
     engine = read_only_engine(database_file)
 
@@ -301,14 +432,16 @@ def _check_schema_matches_heads(database_file: Path, head_text: str) -> None:
         actual = describe_schema(engine)
     except DBAPIError as error:
         raise DatabaseUnavailableError(
-            f"Could not read the schema of {database_file}: {error.orig}."
+            f"Could not read the schema of {database_file} "
+            f"({describe_driver_error(error.orig)})."
         ) from error
     finally:
         engine.dispose()
 
-    differences = compare_schemas(build_reference_schema("heads"), actual)
+    expected = build_reference_schema("heads")
 
-    if differences:
+    if compare_schemas(expected, actual):
+        differences = summarise_schema_differences(expected, actual)
         listing = "\n".join(f"  - {difference}" for difference in differences)
 
         raise SchemaMismatchError(
@@ -348,7 +481,8 @@ def ensure_database_at_head(database_file: Path) -> None:
         recorded = read_database_revisions(database_file)
     except sqlite3.Error as error:
         raise DatabaseUnavailableError(
-            f"Could not read the migration state of {database_file}: {error}."
+            f"Could not read the migration state of {database_file} "
+            f"({describe_driver_error(error)})."
         ) from error
 
     _check_recorded_revisions(database_file, recorded, script)

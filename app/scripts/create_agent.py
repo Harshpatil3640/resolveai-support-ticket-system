@@ -1,16 +1,28 @@
 
 import sys
 from getpass import getpass
-from pathlib import Path
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.security import hash_password
+from app.core.roles import UserRole
 from app.db.database import engine
-from app.db.migrations import DatabaseNotAtHeadError, ensure_database_at_head
-from app.models import User
+from app.scripts.provisioning import (
+    database_failure_report,
+    database_is_ready,
+    rollback_after_failure,
+    rollback_failure_note,
+    sanitised_database_logging,
+)
+from app.services.user_service import (
+    MIN_PASSWORD_LENGTH,
+    InvalidUserDataError,
+    UserAlreadyExistsError,
+    create_user,
+    validate_email,
+    validate_name,
+    validate_password,
+)
 
 
 def require_migrated_database() -> None:
@@ -20,13 +32,11 @@ def require_migrated_database() -> None:
     is an explicit operator step (see docs/database-migrations.md).
     """
 
-    try:
-        ensure_database_at_head(Path(engine.url.database))
-    except DatabaseNotAtHeadError as error:
-        print(f"Cannot create an agent. {error}", file=sys.stderr)
-        raise SystemExit(1) from error
+    if not database_is_ready(engine, "create an agent"):
+        raise SystemExit(1)
 
 
+@sanitised_database_logging
 def create_agent() -> None:
     """Create an initial support agent interactively."""
 
@@ -36,18 +46,22 @@ def create_agent() -> None:
     # password, so nothing is collected for a database that cannot be used.
     require_migrated_database()
 
-    name = input("Enter agent name: ").strip()
-    email = input("Enter agent email: ").strip().lower()
-
-    if not name or not email or "@" not in email:
+    try:
+        name = validate_name(input("Enter agent name: "))
+        email = validate_email(input("Enter agent email: "))
+    except InvalidUserDataError:
         print("Invalid name or email.")
         return
 
-    password = getpass("Enter password (minimum 12 characters): ")
+    password = getpass(
+        f"Enter password (minimum {MIN_PASSWORD_LENGTH} characters): "
+    )
     confirm_password = getpass("Confirm password: ")
 
-    if len(password) < 12:
-        print("Password must contain at least 12 characters.")
+    try:
+        validate_password(password)
+    except InvalidUserDataError as error:
+        print(error)
         return
 
     if password != confirm_password:
@@ -55,33 +69,42 @@ def create_agent() -> None:
         return
 
     with Session(engine) as db:
-
-        existing_user = db.scalar(
-            select(User).where(User.email == email)
-        )
-
-        if existing_user:
-            print("An account with this email already exists.")
-            return
-
-        agent = User(
-            name=name,
-            email=email,
-            password_hash=hash_password(password),
-            role="agent",
-            is_active=True,
-        )
-
-        db.add(agent)
-
         try:
-            db.commit()
-            db.refresh(agent)
+            agent = create_user(
+                db,
+                name=name,
+                email=email,
+                password=password,
+                role=UserRole.AGENT,
+            )
 
-        except IntegrityError:
-            db.rollback()
-            print("Could not create agent. Check for duplicate email.")
+        except UserAlreadyExistsError as error:
+            # create_user() rolled back; report its rollback failure, if any.
+            print(
+                "An account with this email already exists."
+                + rollback_failure_note(rollback_after_failure(db, error))
+            )
             return
+
+        except InvalidUserDataError as error:
+            print(error)
+            return
+
+        except SQLAlchemyError as error:
+            # create_user() has already rolled back any uncommitted work.
+            # str(error) may contain the password hash as a bound
+            # parameter, so only a sanitised description is printed. The
+            # original failure stays primary; a failed rollback is reported
+            # once, as a separate diagnostic.
+            detail, rollback_failure = database_failure_report(db, error)
+            note = rollback_failure_note(rollback_failure)
+            print(
+                "Could not create the agent because of a database error "
+                f"({detail}).{note} Check whether the account exists before "
+                "retrying.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
 
         print("\nAgent created successfully!")
         print(f"Agent ID: {agent.id}")

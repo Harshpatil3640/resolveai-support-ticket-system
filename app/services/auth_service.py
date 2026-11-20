@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import jwt
 from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -12,6 +12,7 @@ from app.core.security import (
     decode_access_token,
     verify_password,
 )
+from app.db.errors import roll_back_keeping_primary, rollback_failure_of
 from app.models import RevokedToken, User
 
 
@@ -147,10 +148,15 @@ def invalidate_user_sessions(
         if commit:
             db.commit()
 
-    except Exception:
-        if commit:
-            db.rollback()
-        raise
+    except Exception as caught:
+        # The original failure stays primary (a missing user remains
+        # UserNotFoundError); a failed rollback is recorded as secondary.
+        primary = roll_back_keeping_primary(db, caught, roll_back=commit)
+
+        if primary is caught:
+            raise
+
+        raise primary from None
 
     if commit:
         # commit() expires loaded attributes. Record the committed version
@@ -201,10 +207,21 @@ def revoke_access_token(
     try:
         db.commit()
 
-    except IntegrityError:
-        db.rollback()
+    except SQLAlchemyError as caught:
+        # Guarded rollback: the original failure stays primary and a
+        # failed rollback is recorded as secondary, never raised instead.
+        primary = roll_back_keeping_primary(db, caught)
 
-        # Another request may have revoked this token first.
-        return db.get(RevokedToken, token_id) is not None
+        if (
+            isinstance(primary, IntegrityError)
+            and rollback_failure_of(primary) is None
+        ):
+            # Another request may have revoked this token first.
+            return db.get(RevokedToken, token_id) is not None
+
+        if primary is caught:
+            raise
+
+        raise primary from None
 
     return True
