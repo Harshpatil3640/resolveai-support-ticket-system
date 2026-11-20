@@ -4,7 +4,9 @@ Each test uses its own SQLite file under pytest's ``tmp_path``; the
 application database (resolveai.db) is never touched.
 """
 
+import functools
 import hashlib
+import logging
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
@@ -18,10 +20,13 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
+from app.db import check_baseline
 from app.db import database as app_database
 from app.db.base import Base
 from app.db.check_baseline import (
+    EXIT_DATABASE_ERROR,
     EXIT_MATCH,
     EXIT_MISMATCH,
     EXIT_NOT_APPLICABLE,
@@ -47,6 +52,27 @@ from app.db.migrations import (
 
 
 HEAD_REVISION = "0002"
+
+
+@pytest.fixture(autouse=True)
+def check_baseline_does_not_configure_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the check_baseline CLI in-process without Alembic logging config.
+
+    In production, ``stamp_baseline()`` loads Alembic's logging config
+    (``fileConfig``), which is correct for a CLI process. Inside the test
+    process, ``fileConfig`` would close every registered logging handler
+    and attach a handler to the current (soon closed) capture stream,
+    affecting later tests. The tests therefore use the existing
+    ``configure_logging=False`` option; production behaviour is unchanged.
+    """
+
+    monkeypatch.setattr(
+        check_baseline,
+        "get_alembic_config",
+        functools.partial(get_alembic_config, configure_logging=False),
+    )
 
 # Schema of a database created by Base.metadata.create_all before Alembic
 # was introduced, captured verbatim from an existing resolveai.db.
@@ -374,9 +400,21 @@ def test_check_baseline_cli_stamps_matching_database(
     legacy_database: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    def _logging_state() -> list[tuple]:
+        return [
+            (name, list(logger.handlers), logger.level, logger.propagate)
+            for name in ("", "alembic", "sqlalchemy.engine")
+            for logger in [logging.getLogger(name)]
+        ]
+
+    before = _logging_state()
+
     exit_code = check_baseline_main(
         ["--database", str(legacy_database), "--stamp"]
     )
+
+    # The in-process stamp must not have reconfigured logging.
+    assert _logging_state() == before
 
     assert exit_code == EXIT_MATCH
     assert _current_revision(legacy_database) == [BASELINE_REVISION]
@@ -400,7 +438,10 @@ def test_baseline_migration_refuses_to_recreate_existing_tables(
         command.upgrade(_config_for(legacy_database), "head")
 
     message = str(error.value)
-    assert "revoked_tokens, tickets, users" in message
+    assert "already contains 3 tables (names not shown)" in message
+
+    for table in ("revoked_tokens", "tickets", "users"):
+        assert table not in message
     assert "python -m app.db.check_baseline --stamp" in message
     assert "Nothing was changed" in message
 
@@ -425,7 +466,10 @@ def test_baseline_migration_refuses_unrelated_existing_table(
 
     before = _sha256(database_file)
 
-    with pytest.raises(RuntimeError, match="already contains tables: notes"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"already contains 1 table \(names not shown\)",
+    ):
         command.upgrade(alembic_config, "head")
 
     assert _table_names(database_file) == {"notes"}
@@ -547,12 +591,12 @@ def test_offline_sql_generation_does_not_touch_any_database(
                 else s
                 for s in sql
             ],
-            "unexpected column token_version",
+            "users: 1 unexpected column (names not shown)",
         ),
         (
             "unexpected table",
             lambda sql: sql + ["CREATE TABLE notes (id INTEGER PRIMARY KEY)"],
-            "unexpected table: notes",
+            "1 unexpected table (names not shown)",
         ),
     ],
 )
@@ -754,7 +798,7 @@ def _missing_index(path: Path) -> None:
         pytest.param(
             _unknown_revision,
             UnknownRevisionError,
-            "records revision 9999, which this code does not know",
+            "records 1 revision value that this code does not know",
             False,
             id="unknown-revision",
         ),
@@ -768,7 +812,8 @@ def _missing_index(path: Path) -> None:
         pytest.param(
             _duplicate_head_rows,
             InconsistentMigrationRecordsError,
-            "records revision 0002 more than once (0002, 0002)",
+            "records the same revision more than once (2 rows in its "
+            "alembic_version table, 1 duplicated value)",
             False,
             id="duplicate-head-rows",
         ),
@@ -782,7 +827,7 @@ def _missing_index(path: Path) -> None:
         pytest.param(
             _foreign_database_at_head,
             SchemaMismatchError,
-            "unexpected table: invoices",
+            "1 unexpected table (names not shown)",
             False,
             id="unrelated-database-at-0002",
         ),
@@ -810,7 +855,7 @@ def _missing_index(path: Path) -> None:
         pytest.param(
             _unexpected_application_table,
             SchemaMismatchError,
-            "unexpected table: notes",
+            "1 unexpected table (names not shown)",
             False,
             id="unexpected-application-table",
         ),
@@ -902,8 +947,14 @@ def test_ensure_database_at_head_rejects_unreadable_file(
     garbage.write_bytes(b"this is not a SQLite database " * 64)
     before = _sha256(garbage)
 
-    with pytest.raises(DatabaseUnavailableError, match="Could not read"):
+    with pytest.raises(DatabaseUnavailableError, match="Could not read") as error:
         ensure_database_at_head(garbage)
+
+    # Only the fixed description is shown, never SQLite's raw message
+    # ("file is not a database").
+    message = str(error.value)
+    assert "(the file is not a SQLite database [SQLITE_NOTADB])" in message
+    assert "file is not a database" not in message
 
     assert _sha256(garbage) == before
 
@@ -951,3 +1002,420 @@ def test_reference_schema_is_built_from_migrations_in_a_temporary_database(
         False,
         "0",
     )
+
+
+# ---------------------------------------------------------------------------
+# Readiness diagnostics never echo database-provided text (A7)
+# ---------------------------------------------------------------------------
+
+
+SECRET_HASH = "$argon2id$v=19$m=65536,t=3,p=4$c2VjcmV0LXNhbHQ$c2VjcmV0LWhhc2g"
+HOSTILE_REVISION = (
+    f"9999'; DROP TABLE users; -- {SECRET_HASH}\x1b[31m\nINJECTED"
+)
+SECRET_DEFAULT = f"stored-default {SECRET_HASH}"
+SECRET_SQL = "SELECT password_hash FROM users"
+HOSTILE_TABLE = f"exfil_{SECRET_HASH}\x1b[2J"
+HOSTILE_COLUMN = f"exfil_col_{SECRET_HASH}"
+
+# Text that may only come from the database, so must never be displayed.
+DATABASE_ONLY_TEXT = (
+    SECRET_HASH,
+    "$argon2",
+    "DROP TABLE",
+    "INJECTED",
+    "9999",
+    "\x1b",
+    "stored-default",
+    SECRET_SQL,
+    "password_hash",
+    "exfil_",
+    "IN ('Open'",
+)
+
+
+def _assert_no_database_text(text: str) -> None:
+    for fragment in DATABASE_ONLY_TEXT:
+        assert fragment not in text, f"diagnostic exposed {fragment!r}"
+
+
+def _set_version_rows(
+    path: Path,
+    values: list[str],
+    *,
+    primary_key: bool = True,
+) -> None:
+    """Replace alembic_version's rows, binding values as parameters."""
+
+    constraint = (
+        ", CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+        if primary_key
+        else ""
+    )
+
+    with _connect(path) as connection:
+        connection.execute("DROP TABLE alembic_version")
+        connection.execute(
+            "CREATE TABLE alembic_version "
+            f"(version_num VARCHAR(32) NOT NULL{constraint})"
+        )
+        connection.executemany(
+            "INSERT INTO alembic_version VALUES (?)",
+            [(value,) for value in values],
+        )
+        connection.commit()
+
+
+@pytest.mark.parametrize(
+    ("values", "primary_key", "error_type", "expected_fragment"),
+    [
+        pytest.param(
+            [HOSTILE_REVISION],
+            True,
+            UnknownRevisionError,
+            "records 1 revision value that this code does not know",
+            id="hostile-unknown-revision",
+        ),
+        pytest.param(
+            [HOSTILE_REVISION, HOSTILE_REVISION],
+            False,
+            InconsistentMigrationRecordsError,
+            "(2 rows in its alembic_version table, 1 duplicated value)",
+            id="hostile-duplicated-revision",
+        ),
+        pytest.param(
+            [HEAD_REVISION, HOSTILE_REVISION],
+            True,
+            UnknownRevisionError,
+            "records 1 revision value that this code does not know",
+            id="head-plus-hostile-revision",
+        ),
+    ],
+)
+def test_revision_diagnostics_never_echo_stored_values(
+    database_file: Path,
+    values: list[str],
+    primary_key: bool,
+    error_type: type[DatabaseNotAtHeadError],
+    expected_fragment: str,
+) -> None:
+    _at_head(database_file)
+    _set_version_rows(database_file, values, primary_key=primary_key)
+    before = _sha256(database_file)
+
+    with pytest.raises(DatabaseNotAtHeadError) as error_info:
+        ensure_database_at_head(database_file)
+
+    message = str(error_info.value)
+
+    assert type(error_info.value) is error_type
+    assert expected_fragment in message
+    _assert_no_database_text(message)
+    assert _sha256(database_file) == before
+
+
+def test_known_revisions_are_shown_from_the_code_not_the_database(
+    database_file: Path,
+) -> None:
+    _at_head(database_file)
+    _set_version_rows(database_file, [BASELINE_REVISION, HEAD_REVISION])
+
+    with pytest.raises(InvalidRevisionSetError) as error_info:
+        ensure_database_at_head(database_file)
+
+    # Both values equal this code's revision IDs, so they may be shown.
+    assert "records several revisions (0001, 0002)" in str(error_info.value)
+
+
+def _hostile_schema(path: Path) -> None:
+    """A database at '0002' whose schema text carries secrets and SQL."""
+
+    schema_sql = [
+        statement.replace(
+            "role VARCHAR(30) NOT NULL",
+            f"role VARCHAR(30) NOT NULL DEFAULT '{SECRET_DEFAULT}'",
+        ).replace(
+            "CHECK (status IN ('Open', 'In Progress', 'Resolved'))",
+            "CHECK (status IN ('Open', 'In Progress', 'Resolved') "
+            f"AND title <> '{SECRET_SQL}')",
+        )
+        for statement in LEGACY_SCHEMA_SQL
+    ]
+
+    _run_sql(
+        path,
+        *schema_sql,
+        "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
+        f'ALTER TABLE users ADD COLUMN "{HOSTILE_COLUMN}" TEXT '
+        f"DEFAULT '{SECRET_DEFAULT}'",
+        f'CREATE TABLE "{HOSTILE_TABLE}" (id INTEGER PRIMARY KEY, '
+        f"note TEXT CHECK (note <> '{SECRET_SQL}'))",
+        "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL, "
+        "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))",
+        f"INSERT INTO alembic_version VALUES ('{HEAD_REVISION}')",
+    )
+
+
+def test_schema_diagnostics_never_echo_definitions_or_sql(
+    database_file: Path,
+) -> None:
+    _hostile_schema(database_file)
+    before = _sha256(database_file)
+
+    with pytest.raises(SchemaMismatchError) as error_info:
+        ensure_database_at_head(database_file)
+
+    error = error_info.value
+    message = str(error)
+
+    # Still detected, and still useful: fixed categories, code-defined
+    # names and counts.
+    assert "users.role: column definition differs" in message
+    assert "users: 1 unexpected column (names not shown)" in message
+    assert "tickets: check constraints differ" in message
+    assert "1 unexpected table (names not shown)" in message
+
+    _assert_no_database_text(message)
+
+    for difference in error.differences:
+        _assert_no_database_text(difference)
+
+    assert _sha256(database_file) == before
+
+
+# ---------------------------------------------------------------------------
+# The check_baseline CLI never echoes database-provided text (A)
+# ---------------------------------------------------------------------------
+
+
+def _hostile_legacy_schema(path: Path) -> None:
+    """A pre-Alembic database whose schema text carries secrets and SQL."""
+
+    schema_sql = [
+        statement.replace(
+            "role VARCHAR(30) NOT NULL",
+            f"role VARCHAR(30) NOT NULL DEFAULT '{SECRET_DEFAULT}'",
+        ).replace(
+            "CHECK (status IN ('Open', 'In Progress', 'Resolved'))",
+            "CHECK (status IN ('Open', 'In Progress', 'Resolved') "
+            f"AND title <> '{SECRET_SQL}')",
+        )
+        for statement in LEGACY_SCHEMA_SQL
+    ]
+
+    _run_sql(
+        path,
+        *schema_sql,
+        f'ALTER TABLE users ADD COLUMN "{HOSTILE_COLUMN}" TEXT '
+        f"DEFAULT '{SECRET_DEFAULT}'",
+        f'CREATE TABLE "{HOSTILE_TABLE}" (id INTEGER PRIMARY KEY, '
+        f"note TEXT CHECK (note <> '{SECRET_SQL}'))",
+    )
+
+
+def test_check_baseline_summarises_hostile_schema_safely(
+    database_file: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _hostile_legacy_schema(database_file)
+    before = _sha256(database_file)
+
+    status, messages = check_database(database_file)
+
+    assert status == EXIT_MISMATCH
+
+    # Detection and diagnostic value are preserved.
+    assert "users.role: column definition differs (type, nullability or default)" in messages
+    assert "users: 1 unexpected column (names not shown)" in messages
+    assert "tickets: check constraints differ" in messages
+    assert "1 unexpected table (names not shown)" in messages
+
+    for message in messages:
+        _assert_no_database_text(message)
+
+    # The CLI (even with --stamp) prints only the summary and stamps nothing.
+    assert check_baseline_main(["--database", str(database_file), "--stamp"]) == (
+        EXIT_MISMATCH
+    )
+
+    captured = capsys.readouterr()
+
+    for stream in (captured.out, captured.err):
+        _assert_no_database_text(stream)
+        assert "Traceback" not in stream
+
+    assert "1 unexpected table (names not shown)" in captured.err
+    assert _sha256(database_file) == before
+    assert "alembic_version" not in _table_names(database_file)
+
+
+@pytest.mark.parametrize(
+    ("values", "primary_key", "expected_fragment"),
+    [
+        pytest.param(
+            [HOSTILE_REVISION],
+            True,
+            "(1 unrecognised revision value (not shown))",
+            id="hostile-revision",
+        ),
+        pytest.param(
+            [HOSTILE_REVISION, HOSTILE_REVISION],
+            False,
+            "(1 unrecognised revision value (not shown))",
+            id="hostile-duplicates",
+        ),
+        pytest.param(
+            [HEAD_REVISION, HOSTILE_REVISION],
+            True,
+            "(recorded revision: 0002; 1 unrecognised revision value "
+            "(not shown))",
+            id="head-plus-hostile",
+        ),
+        pytest.param(
+            [],
+            True,
+            "(no revision recorded)",
+            id="empty-version-table",
+        ),
+        pytest.param(
+            [BASELINE_REVISION],
+            True,
+            "(recorded revision: 0001)",
+            id="known-revision",
+        ),
+    ],
+)
+def test_check_baseline_never_echoes_recorded_revisions(
+    database_file: Path,
+    capsys: pytest.CaptureFixture[str],
+    values: list[str],
+    primary_key: bool,
+    expected_fragment: str,
+) -> None:
+    _at_head(database_file)
+    _set_version_rows(database_file, values, primary_key=primary_key)
+    before = _sha256(database_file)
+
+    status, messages = check_database(database_file)
+
+    assert status == EXIT_NOT_APPLICABLE
+    assert expected_fragment in messages[0]
+
+    for message in messages:
+        _assert_no_database_text(message)
+
+    assert check_baseline_main(["--database", str(database_file)]) == (
+        EXIT_NOT_APPLICABLE
+    )
+
+    captured = capsys.readouterr()
+
+    for stream in (captured.out, captured.err):
+        _assert_no_database_text(stream)
+
+    assert _sha256(database_file) == before
+
+
+def test_check_baseline_reports_unreadable_file_safely(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"this is not a SQLite database " * 64)
+    before = _sha256(garbage)
+
+    assert check_baseline_main(["--database", str(garbage)]) == EXIT_DATABASE_ERROR
+
+    captured = capsys.readouterr()
+
+    assert (
+        "(DatabaseError: the file is not a SQLite database [SQLITE_NOTADB])"
+        in captured.err
+    )
+
+    for stream in (captured.out, captured.err):
+        assert "file is not a database" not in stream  # the raw driver text
+        assert "PRAGMA" not in stream
+        assert "Traceback" not in stream
+
+    assert _sha256(garbage) == before
+
+
+def test_check_baseline_reports_stamp_failure_safely(
+    legacy_database: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _failing_stamp(*_args, **_kwargs):
+        driver_error = sqlite3.OperationalError(f"stamp detail {SECRET_HASH}")
+        driver_error.sqlite_errorname = "SQLITE_BUSY"
+        raise OperationalError(
+            "INSERT INTO alembic_version (version_num) VALUES (?)",
+            (SECRET_HASH,),
+            driver_error,
+        )
+
+    monkeypatch.setattr(command, "stamp", _failing_stamp)
+
+    exit_code = check_baseline_main(
+        ["--database", str(legacy_database), "--stamp"]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == EXIT_DATABASE_ERROR
+    assert (
+        "Could not stamp the baseline revision (OperationalError: the "
+        "database is locked [SQLITE_BUSY])"
+    ) in captured.err
+
+    for stream in (captured.out, captured.err):
+        _assert_no_database_text(stream)
+        assert "stamp detail" not in stream
+        assert "INSERT INTO" not in stream
+        assert "Traceback" not in stream
+
+    assert "alembic_version" not in _table_names(legacy_database)
+
+
+# ---------------------------------------------------------------------------
+# The baseline migration's refusal never names existing tables (FIX 1)
+# ---------------------------------------------------------------------------
+
+
+HOSTILE_TABLE_NAMES = (
+    f"leak_{SECRET_HASH}\x1b[31m",
+    f"drop\nTABLE users; -- {SECRET_HASH}",
+)
+
+
+def test_baseline_refusal_never_names_existing_tables(
+    database_file: Path,
+    alembic_config: Config,
+) -> None:
+    _run_sql(
+        database_file,
+        *(
+            f'CREATE TABLE "{name}" (id INTEGER PRIMARY KEY)'
+            for name in HOSTILE_TABLE_NAMES
+        ),
+    )
+    tables_before = _table_names(database_file)
+    before = _sha256(database_file)
+
+    assert tables_before == set(HOSTILE_TABLE_NAMES)
+
+    with pytest.raises(RuntimeError) as error_info:
+        command.upgrade(alembic_config, "head")
+
+    message = str(error_info.value)
+
+    # Still refused, with a count instead of the names.
+    assert "already contains 2 tables (names not shown)" in message
+    assert "Nothing was changed" in message
+
+    for fragment in (SECRET_HASH, "$argon2", "\x1b", "leak_", "drop\n", "DROP"):
+        assert fragment not in message
+
+    assert _table_names(database_file) == tables_before
+    assert _sha256(database_file) == before

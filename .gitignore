@@ -228,6 +228,10 @@ __marimo__/
 *.db-wal
 *.db-shm
 
+# Database backups made before migrations or repairs. They contain user
+# records and password hashes, so they must never be committed.
+resolveai.db*.bak
+
 # ResolveAI machine learning datasets
 data/raw/
 data/processed/

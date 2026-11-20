@@ -142,3 +142,71 @@ def compare_schemas(expected: Schema, actual: Schema) -> list[str]:
                 )
 
     return differences
+
+
+_SCHEMA_PARTS = (
+    ("primary_key", "primary key"),
+    ("foreign_keys", "foreign keys"),
+    ("indexes", "indexes"),
+    ("unique_constraints", "unique constraints"),
+    ("check_constraints", "check constraints"),
+)
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" + ("" if number == 1 else "s")
+
+
+def summarise_schema_differences(expected: Schema, actual: Schema) -> list[str]:
+    """Describe schema differences without any database-provided text.
+
+    ``compare_schemas`` names everything (including live table and column
+    names, defaults and CHECK-constraint SQL) and is used only to DETECT a
+    difference. This summary is what may be DISPLAYED: only table and
+    column names from ``expected`` (the schema built from this code's
+    migrations) appear; objects that exist only in the live database are
+    counted, never named; definitions (types, defaults, index contents,
+    CHECK-constraint SQL) are reported only as "differ". It covers every
+    category ``compare_schemas`` reports, so it is never empty when a
+    difference exists.
+    """
+
+    differences = [
+        f"missing table: {table}"
+        for table in sorted(expected.keys() - actual.keys())
+    ]
+
+    unexpected_tables = len(actual.keys() - expected.keys())
+
+    if unexpected_tables:
+        differences.append(
+            f"{_count(unexpected_tables, 'unexpected table')} "
+            "(names not shown)"
+        )
+
+    for table in sorted(expected.keys() & actual.keys()):
+        want, have = expected[table], actual[table]
+
+        for column in sorted(want["columns"].keys() - have["columns"].keys()):
+            differences.append(f"{table}: missing column {column}")
+
+        unexpected_columns = len(have["columns"].keys() - want["columns"].keys())
+
+        if unexpected_columns:
+            differences.append(
+                f"{table}: {_count(unexpected_columns, 'unexpected column')} "
+                "(names not shown)"
+            )
+
+        for column in sorted(want["columns"].keys() & have["columns"].keys()):
+            if want["columns"][column] != have["columns"][column]:
+                differences.append(
+                    f"{table}.{column}: column definition differs "
+                    "(type, nullability or default)"
+                )
+
+        for key, label in _SCHEMA_PARTS:
+            if want[key] != have[key]:
+                differences.append(f"{table}: {label} differ")
+
+    return differences

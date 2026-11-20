@@ -18,10 +18,13 @@ DATABASE_URL = URL.create(
     database=str(DATABASE_FILE),
 )
 
-# Create the SQLAlchemy engine
+# Create the SQLAlchemy engine.
+# hide_parameters keeps bound values (such as password hashes) out of
+# exception messages and SQL logs; statements are still shown.
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False},
+    hide_parameters=True,
 )
 
 @event.listens_for(engine, "connect")

@@ -63,9 +63,13 @@ def _refuse_non_empty_database() -> None:
     )
 
     if existing:
+        # Table names come from the database itself, so only their number
+        # is reported (names could contain secrets or control characters).
+        count = len(existing)
         raise RuntimeError(
             "The baseline migration only initialises an empty database, but "
-            f"this database already contains tables: {', '.join(existing)}. "
+            f"this database already contains {count} "
+            f"{'table' if count == 1 else 'tables'} (names not shown). "
             "Nothing was changed. If this is an existing ResolveAI database, "
             "back it up, verify it with 'python -m app.db.check_baseline' and "
             "stamp the baseline with 'python -m app.db.check_baseline --stamp' "

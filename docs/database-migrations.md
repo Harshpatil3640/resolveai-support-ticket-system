@@ -80,8 +80,18 @@ check constraints with a temporary database built from revision `0001`.
 | Exit code | Meaning | What to do |
 |-----------|---------|------------|
 | `0` | Schema matches the baseline. | Continue to step 3. |
-| `1` | Schema differs; every difference is listed. | **Stop.** Do not stamp. Investigate each difference (for example, a manual edit or an older/newer schema) and resolve it first. |
-| `2` | Not applicable: the file is missing, has no tables, or is already managed by Alembic (the current revision is shown). | For a missing or empty database use section 2; for a managed one use section 4. |
+| `1` | Schema differs; every difference is summarised (see below). | **Stop.** Do not stamp. Investigate each difference (for example, a manual edit or an older/newer schema) and resolve it first. |
+| `2` | Not applicable: the file is missing, has no tables, or is already managed by Alembic (recognised revisions are shown). | For a missing or empty database use section 2; for a managed one use section 4. |
+| `3` | The database could not be read, or the stamp failed (a short diagnostic such as "the database is locked" is shown). | Fix the underlying problem (lock, permissions, a damaged file) and re-run. Nothing was stamped. |
+
+The output never contains text read from the database itself, which could
+include sensitive data or terminal control characters. Differences name only
+this project's own tables and columns ("missing column", "column definition
+differs", "check constraints differ"); objects that exist only in the
+inspected database are counted ("1 unexpected table (names not shown)");
+recorded revisions are shown only when they are one of this project's
+revision IDs. Inspect the database directly (for example with the `sqlite3`
+shell) if you need the full details.
 
 ### Step 3: Stamp the baseline revision
 
@@ -175,8 +185,9 @@ alembic upgrade 0001:0002 --sql
 
 ## 7. Provisioning users requires a migrated database
 
-`python -m app.scripts.create_agent` never runs migrations. Before asking for
-any input (including the password) it checks, read-only, that:
+The provisioning scripts, `python -m app.scripts.create_admin` and
+`python -m app.scripts.create_agent`, never run migrations. Before asking for
+any input (including the password) each checks, read-only, that:
 
 1. the `alembic_version` table records exactly the head revision, once; and
 2. the schema (tables, columns, types, nullability, defaults, primary and
@@ -211,6 +222,17 @@ running migrations could damage it:
    should the records be reset (for example
    `alembic stamp --purge <revision>`); the check then re-verifies the
    schema before any user can be provisioned.
+
+### "Alembic could not resolve a recorded database revision"
+
+Alembic commands (`upgrade`, `downgrade`, `current`, `stamp`, `check`, ...)
+stop with this message when `alembic_version` records a revision this code
+does not know. The stored value is deliberately not shown: it is database
+content and could contain secrets or terminal control characters. Nothing is
+changed. Treat it like the "Unknown revision" row above and use code that
+matches the database. Reset the records with
+`alembic stamp --purge <revision>` only after confirming the schema matches
+that revision (see "Inconsistent records or schema mismatch").
 
 ## Downgrading
 

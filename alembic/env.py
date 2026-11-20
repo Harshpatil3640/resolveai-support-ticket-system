@@ -3,14 +3,21 @@
 from logging.config import fileConfig
 
 from alembic import context
+from alembic.util import CommandError
 from sqlalchemy import create_engine, event, pool
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 # Importing the models package registers every table on Base.metadata,
 # so autogenerate always sees the complete schema.
 from app import models  # noqa: F401
 from app.db.base import Base
 from app.db.database import DATABASE_URL
+from app.db.migrations import (
+    migration_database_error,
+    migration_revision_error,
+)
+from app.db.safe_logging import sanitised_database_logs
 
 
 config = context.config
@@ -98,21 +105,52 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations against a live database connection."""
+    """Run migrations against a live database connection.
+
+    Two kinds of failure can carry database content into Alembic's
+    "FAILED: ..." line or a traceback, so each is replaced with fixed text:
+
+    * a SQLAlchemy error (driver message, SQL, bound parameters) becomes a
+      ``MigrationDatabaseError``;
+    * a revision error that may quote a value read from ``alembic_version``
+      becomes a ``MigrationRevisionError``. ``alembic stamp --purge`` is
+      unaffected: Alembic then deletes the stored rows without resolving
+      them, so no revision error is raised.
+
+    The replacement is raised after the ``try`` statement, outside every
+    ``except`` block, so neither its ``__cause__`` nor its ``__context__``
+    refers to the original exception.
+    """
 
     engine = make_transactional_sqlite_engine(get_database_url())
+    failure: CommandError | None = None
 
     try:
-        with engine.connect() as connection:
+        with sanitised_database_logs(engine), engine.connect() as connection:
             _configure_context(
                 connection=connection,
                 transactional_ddl=True,
             )
 
-            with context.begin_transaction():
-                context.run_migrations()
+            try:
+                with context.begin_transaction():
+                    context.run_migrations()
+            except CommandError as error:
+                failure = migration_revision_error(
+                    error,
+                    context.get_context().get_current_heads,
+                    context.script,
+                )
+
+                if failure is None:
+                    raise
+    except SQLAlchemyError as error:
+        failure = migration_database_error(error)
     finally:
         engine.dispose()
+
+    if failure is not None:
+        raise failure
 
 
 if context.is_offline_mode():

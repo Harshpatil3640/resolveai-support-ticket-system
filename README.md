@@ -461,14 +461,80 @@ baseline. Inspect the state with `alembic current` and create new migrations
 with `alembic revision --autogenerate -m "message"`.
 
 Migrations are always an explicit step; nothing runs them automatically.
-`python -m app.scripts.create_agent` requires the database to already be at
+The provisioning scripts (`python -m app.scripts.create_admin` and
+`python -m app.scripts.create_agent`) require the database to already be at
 the Alembic head revision, with exactly the schema the migrations produce, and
-stops, without changing anything, if it is not.
+stop, without changing anything, if it is not.
 SQL generated offline with `--sql` skips the baseline's safety check, so never
 apply it to an existing database.
 
 Full procedure, exit codes and troubleshooting:
 [docs/database-migrations.md](docs/database-migrations.md).
+
+## Creating the First Administrator
+
+ResolveAI has no default administrator account and no public sign-up for
+administrators. The first administrator is created once, from the server's
+command line, after the database has been migrated:
+
+```cmd
+python -m app.scripts.create_admin
+```
+
+The script:
+
+1. Checks, read-only, that the database is at the Alembic head revision with
+   the expected schema. It never runs migrations.
+2. Refuses to continue if **any** administrator account already exists,
+   active or inactive, before asking for any input.
+3. Asks for the administrator's name and email, then for a password twice
+   (hidden input, 12 to 128 characters).
+4. Creates the account with the `admin` role and prints its ID, name, email
+   and role. Passwords and password hashes are never printed, including in
+   database error messages: the application engine hides SQL parameters,
+   and the scripts print only a short sanitised diagnostic.
+
+It exits with code `0` on success and `1` otherwise.
+
+**Concurrency (SQLite only).** If two bootstraps run at the same time, at
+most one administrator is created: the script re-counts administrators
+inside its write transaction and commits only if there is exactly one. This
+relies on SQLite allowing a single writer at a time. It is **not**
+guaranteed on PostgreSQL or other databases; moving to one will require an
+explicit lock or constraint for the bootstrap.
+
+**Why only from the command line?** An HTTP endpoint that creates the first
+administrator would be reachable by anyone who finds the server before the
+real owner does. Requiring local access to the server and its database means
+only an operator who already controls the deployment can create the first
+administrator. Once one exists, the script permanently refuses to run.
+
+**Further administrators** will be created by an existing, signed-in
+administrator through the admin-only user-management API (planned; not yet
+available). Support agents can still be created locally with
+`python -m app.scripts.create_agent`.
+
+Choose a strong, unique password when prompted. Never commit credentials,
+and never share the administrator's password.
+
+### Resetting an agent's password
+
+```cmd
+python -m app.scripts.reset_agent_password
+```
+
+The script checks the database is at the Alembic head revision before asking
+for anything, finds the agent by email (ignoring case) and only resets
+accounts with the agent role. The new password is saved and every existing
+session for the account is signed out (its token version is incremented) in
+a single transaction, so either both changes happen or neither does.
+
+### Password rules
+
+Passwords must be 12 to 128 characters long. The limits are enforced by the
+shared user service (`app/services/user_service.py`), whatever the caller.
+Future HTTP request schemas that accept a password must also declare
+`max_length=128`, so oversized values are rejected before hashing.
 
 ## Running Tests
 

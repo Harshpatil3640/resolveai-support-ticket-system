@@ -16,12 +16,15 @@ import pytest
 from alembic import command
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.core.roles import UserRole
 from app.core.security import hash_password, verify_password
 from app.db.migrations import BASELINE_REVISION, get_alembic_config, sqlite_url
 from app.models import User
 from app.scripts import create_agent as create_agent_module
+from app.services import user_service
 
 
 HEAD_REVISION = "0002"
@@ -408,7 +411,8 @@ def test_refuses_foreign_database_at_head_revision_before_any_prompt(
 
     assert "does not match the ResolveAI schema" in error
     assert "missing table: users" in error
-    assert "unexpected table: invoices" in error
+    assert "1 unexpected table (names not shown)" in error
+    assert "invoices" not in error
     assert prompts.asked == []
     assert _sha256(database_file) == before
 
@@ -438,3 +442,244 @@ def test_refuses_corrupt_migration_records_without_upgrade_advice(
     assert "Do not run 'alembic upgrade head'" in error
     assert prompts.asked == []
     assert _sha256(database_file) == before
+
+
+# ---------------------------------------------------------------------------
+# Behaviour preserved by the refactor onto the shared user service
+# ---------------------------------------------------------------------------
+
+
+def test_agent_is_created_through_shared_service_with_agent_role(
+    head_database: Engine,
+    prompts: ScriptedPrompts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+    real_create_user = create_agent_module.create_user
+
+    def _spy(db, **kwargs):
+        calls.append(kwargs)
+        return real_create_user(db, **kwargs)
+
+    monkeypatch.setattr(create_agent_module, "create_user", _spy)
+
+    prompts.inputs = ["  Spaced Agent  ", "agent@example.test"]
+    prompts.passwords = [AGENT_PASSWORD, AGENT_PASSWORD]
+
+    create_agent_module.create_agent()
+
+    assert len(calls) == 1
+    assert calls[0]["role"] == UserRole.AGENT
+
+    with Session(head_database) as db:
+        agent = db.scalar(select(User))
+
+    assert agent.name == "Spaced Agent"
+    assert agent.role == "agent"
+    assert agent.is_active is True
+    assert agent.token_version == 0
+
+
+def test_duplicate_email_in_different_case_is_rejected(
+    head_database: Engine,
+    prompts: ScriptedPrompts,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Stored with capitals, as a row created before normalisation might be.
+    with Session(head_database) as db:
+        db.add(
+            User(
+                name="Existing",
+                email="Agent@Example.TEST",
+                password_hash=hash_password(AGENT_PASSWORD),
+            )
+        )
+        db.commit()
+
+    prompts.inputs = ["Another Agent", "agent@example.test"]
+    prompts.passwords = [AGENT_PASSWORD, AGENT_PASSWORD]
+
+    create_agent_module.create_agent()
+
+    assert "An account with this email already exists." in capsys.readouterr().out
+    assert _count_users(head_database) == 1
+
+
+def test_agent_output_never_contains_password_or_hash(
+    head_database: Engine,
+    prompts: ScriptedPrompts,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompts.inputs = ["Agent", "agent@example.test"]
+    prompts.passwords = [AGENT_PASSWORD, AGENT_PASSWORD]
+
+    create_agent_module.create_agent()
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+
+    with Session(head_database) as db:
+        password_hash = db.scalar(select(User.password_hash))
+
+    assert AGENT_PASSWORD not in output
+    assert password_hash not in output
+
+
+# ---------------------------------------------------------------------------
+# Unexpected database failures never reveal secrets
+# ---------------------------------------------------------------------------
+
+
+def test_insert_failure_after_hashing_is_reported_safely(
+    database_file: Path,
+    head_database: Engine,
+    prompts: ScriptedPrompts,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hashes: list[str] = []
+    real_hash = user_service.hash_password
+
+    def _recording_hash(password: str) -> str:
+        hashes.append(real_hash(password))
+        return hashes[-1]
+
+    monkeypatch.setattr(user_service, "hash_password", _recording_hash)
+
+    # A trigger makes the INSERT fail after the password was hashed.
+    with closing(sqlite3.connect(database_file)) as connection:
+        connection.execute(
+            "CREATE TRIGGER block_insert BEFORE INSERT ON users "
+            "BEGIN SELECT RAISE(ABORT, 'simulated failure'); END"
+        )
+        connection.commit()
+
+    prompts.inputs = ["Agent", "agent@example.test"]
+    prompts.passwords = [AGENT_PASSWORD, AGENT_PASSWORD]
+
+    with pytest.raises(SystemExit) as exit_info:
+        create_agent_module.create_agent()
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+
+    assert exit_info.value.code == 1
+    assert "Could not create the agent because of a database error" in captured.err
+    assert "IntegrityError" in captured.err
+    assert _count_users(head_database) == 0
+
+    assert hashes, "the failure must happen after the password was hashed"
+    assert AGENT_PASSWORD not in output
+    assert hashes[0] not in output
+    assert "$argon2" not in output
+
+
+FAKE_HASH = "$argon2id$v=19$m=65536,t=3,p=4$ZmFrZS1zYWx0$ZmFrZS1oYXNoLXZhbHVl"
+RAW_DRIVER_TEXT = "driver detail leaked"
+
+
+def test_hash_inside_driver_message_is_never_printed(
+    head_database: Engine,
+    prompts: ScriptedPrompts,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The driver's own message carries a hash; only fixed text is shown."""
+
+    driver_error = sqlite3.OperationalError(f"{RAW_DRIVER_TEXT}: {FAKE_HASH}")
+    driver_error.sqlite_errorname = "SQLITE_IOERR_WRITE"
+
+    class FailingSession(Session):
+        def commit(self) -> None:
+            raise OperationalError(
+                "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+                None,
+                driver_error,
+            )
+
+    monkeypatch.setattr(create_agent_module, "Session", FailingSession)
+
+    prompts.inputs = ["Agent", "agent@example.test"]
+    prompts.passwords = [AGENT_PASSWORD, AGENT_PASSWORD]
+
+    with pytest.raises(SystemExit) as exit_info:
+        create_agent_module.create_agent()
+
+    captured = capsys.readouterr()
+
+    assert exit_info.value.code == 1
+
+    for stream in (captured.out, captured.err):
+        assert FAKE_HASH not in stream
+        assert "$argon2" not in stream
+        assert RAW_DRIVER_TEXT not in stream
+        assert "INSERT INTO" not in stream
+        assert "Traceback" not in stream
+
+    assert (
+        "(OperationalError: a disk I/O error occurred [SQLITE_IOERR_WRITE])"
+        in captured.err
+    )
+    assert _count_users(head_database) == 0
+
+
+# ---------------------------------------------------------------------------
+# A failing rollback never produces a traceback or raw text (A8)
+# ---------------------------------------------------------------------------
+
+
+def test_rollback_failure_is_reported_safely(
+    head_database: Engine,
+    prompts: ScriptedPrompts,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both the commit and every rollback fail with secret-bearing errors."""
+
+    def _secret_error(statement: str, code: str) -> OperationalError:
+        driver_error = sqlite3.OperationalError(
+            f"{RAW_DRIVER_TEXT}: {FAKE_HASH}"
+        )
+        driver_error.sqlite_errorname = code
+
+        return OperationalError(statement, (FAKE_HASH,), driver_error)
+
+    class FailingSession(Session):
+        def commit(self) -> None:
+            raise _secret_error("COMMIT", "SQLITE_BUSY")
+
+        def rollback(self) -> None:
+            raise _secret_error("ROLLBACK", "SQLITE_IOERR")
+
+    monkeypatch.setattr(create_agent_module, "Session", FailingSession)
+
+    prompts.inputs = ["Agent", "agent@example.test"]
+    prompts.passwords = [AGENT_PASSWORD, AGENT_PASSWORD]
+
+    with pytest.raises(SystemExit) as exit_info:
+        create_agent_module.create_agent()
+
+    captured = capsys.readouterr()
+
+    assert exit_info.value.code == 1
+    # The commit failure stays primary; create_user()'s failed rollback is
+    # reported once, as the secondary diagnostic.
+    assert (
+        "Could not create the agent because of a database error "
+        "(OperationalError: the database is locked [SQLITE_BUSY]). "
+        "The rollback also failed (OperationalError: a disk I/O error "
+        "occurred [SQLITE_IOERR]). Check whether the account exists before "
+        "retrying."
+    ) in captured.err
+    assert captured.err.count("The rollback also failed") == 1
+
+    for stream in (captured.out, captured.err):
+        assert FAKE_HASH not in stream
+        assert "$argon2" not in stream
+        assert RAW_DRIVER_TEXT not in stream
+        assert "COMMIT" not in stream
+        assert "ROLLBACK" not in stream
+        assert "INSERT INTO" not in stream
+        assert "Traceback" not in stream
+
+    assert _count_users(head_database) == 0
