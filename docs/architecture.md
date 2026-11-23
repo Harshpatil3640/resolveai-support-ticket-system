@@ -17,11 +17,14 @@ The first version will run locally on Windows and use SQLite. No paid AI API or 
 ```mermaid
 flowchart TD
     USER["Support Agent"]
+    ADMINUSER["Administrator"]
     FRONTEND["Browser Frontend<br/>HTML, CSS, JavaScript"]
     API["FastAPI Application"]
     AUTH["Authentication Service"]
     TICKETS["Ticket Service"]
     ANALYTICS["Analytics Service"]
+    USERADMIN["User Administration Service"]
+    AUDIT["Audit Log<br/>resolveai.audit logger"]
     PREDICT["ML Prediction Service"]
     DATAACCESS["Database Access Layer<br/>SQLAlchemy"]
     DB[("SQLite Database")]
@@ -33,13 +36,17 @@ flowchart TD
 
     USER --> FRONTEND
     FRONTEND <-->|"HTTP and JSON"| API
+    ADMINUSER -->|"HTTP and JSON<br/>/api/admin"| API
     API --> AUTH
     API --> TICKETS
     API --> ANALYTICS
+    API --> USERADMIN
+    API -->|"after commit"| AUDIT
     TICKETS --> PREDICT
     TICKETS --> DATAACCESS
     AUTH --> DATAACCESS
     ANALYTICS --> DATAACCESS
+    USERADMIN --> DATAACCESS
     DATAACCESS <--> DB
     PREDICT --> MODEL
     DATA --> TRAIN
@@ -97,6 +104,7 @@ Planned API groups:
 - Authentication
 - Tickets
 - Analytics
+- Administration: user management, admin only (implemented in `app/api/routes/admin.py`; see [section 14](#14-admin-user-management))
 - ML predictions and evaluation metrics
 
 Interactive API documentation will be available through FastAPI's development documentation page.
@@ -113,6 +121,7 @@ Planned services:
 - Ticket creation and updates
 - Ticket search and filtering
 - Dashboard aggregation
+- User administration: account creation, listing, role and status changes (`app/services/user_service.py`)
 
 ### 4.4 Database layer
 
@@ -165,7 +174,7 @@ The `users` table will contain:
 - `name`: Display name
 - `email`: Unique login identifier
 - `password_hash`: Secure password hash
-- `role`: Authorised application role
+- `role`: Authorised application role: `admin`, `agent` or `customer`
 - `is_active`: Whether the account may authenticate
 - `token_version`: Session version embedded in every access token; incrementing it invalidates all previously issued tokens for the user
 - `created_at`: Account creation timestamp
@@ -206,12 +215,17 @@ The application must handle tickets that have not yet received a valid predictio
 | GET | `/api/tickets/{id}` | Retrieve a ticket |
 | PATCH | `/api/tickets/{id}` | Update ticket fields |
 | GET | `/api/analytics/summary` | Retrieve dashboard statistics |
+| GET | `/api/admin/users` | List, search and filter users (admin only) |
+| GET | `/api/admin/users/{user_id}` | Retrieve a user (admin only) |
+| POST | `/api/admin/users` | Create a user (admin only) |
+| PATCH | `/api/admin/users/{user_id}/role` | Change a user's role (admin only) |
+| PATCH | `/api/admin/users/{user_id}/status` | Activate or deactivate a user (admin only) |
 | POST | `/api/ml/predict` | Test an ML prediction |
 | GET | `/api/ml/metrics` | Retrieve the saved evaluation report |
 
 All protected endpoints must enforce authentication and appropriate access permissions.
 
-The final request and response schemas will be specified during implementation.
+The final request and response schemas will be specified during implementation. The admin user-management endpoints are implemented; their request, response and error contract is documented in the [README](../README.md#admin-user-management).
 
 ## 8. Machine-learning workflow
 
@@ -244,6 +258,9 @@ Reported metrics must come from actual evaluation results. Confidence estimates 
 - Avoid logging passwords, secret tokens or unnecessary personal information.
 - Use only trusted model artifacts created by the project's training workflow.
 - Use production security settings before any public deployment.
+- Return `401` when authentication fails and `403` when an authenticated user's role is not permitted; decide authorisation before validating request bodies.
+- Never return password hashes or `token_version` in API responses, and never echo submitted values in validation errors on the admin API.
+- Record administrative actions with IDs, action names and role/status values only (see [section 14.6](#146-audit-logging)).
 
 ## 10. Testing strategy
 
@@ -319,3 +336,182 @@ Before implementation is complete, we must verify:
 - Database migration requirements. (Resolved: Alembic, with a baseline revision for pre-existing databases.)
 - How the trained model and evaluation report will be generated from a fresh clone.
 - The security configuration required for any public deployment.
+- Concurrency of protected admin changes on PostgreSQL. Row locking is implemented but has only been checked by compiling the SQL, not under concurrent load on a live PostgreSQL server (see [section 14.4](#144-postgresql-and-other-databases)).
+- Whether a persistent, database-backed audit trail is required in addition to the audit log stream.
+
+## 14. Admin user management
+
+Administrators manage accounts through the admin-only API in
+`app/api/routes/admin.py` (mounted at `/api/admin`). The route module maps
+service outcomes to HTTP responses and writes the audit log. The rules and
+transactions live in `app/services/user_service.py`. The HTTP contract
+(parameters, bodies, status codes, examples) is documented in the
+[README](../README.md#admin-user-management).
+
+### 14.1 Roles and request authorisation
+
+The three roles are defined in `app/core/roles.py` (`UserRole`): `admin`,
+`agent` and `customer`.
+
+1. `get_current_user` (`app/api/dependencies.py`) decodes the JWT and loads
+   the user from the database. A missing or invalid token, a revoked token,
+   an inactive account or a `token_version` that differs from the stored one
+   gives `401`.
+2. `require_admin` (`require_roles(UserRole.ADMIN)`) gives `403` unless the
+   stored role is exactly `admin`. Unknown stored roles are denied.
+3. The admin router declares `require_admin` as a router-wide dependency, and
+   each endpoint declares it as well (FastAPI evaluates it once per request).
+   Dependencies run before body validation, so non-administrators receive
+   `403`, never `422`.
+
+The role is never read from the token; it is loaded from the database on
+every request. This is why a role change takes effect immediately for tokens
+the user already holds, without incrementing `token_version`.
+
+### 14.2 Session invalidation
+
+A status change (deactivation **or** reactivation) writes `is_active` and then
+increments `token_version` with an atomic SQL `UPDATE`
+(`invalidate_user_sessions(commit=False)`). Both changes are committed
+together, so every token issued before the change is rejected afterwards, and
+tokens issued before a deactivation never become valid again after
+reactivation. Requesting the status the account already has writes nothing
+and does not increment `token_version`.
+
+Users are not deleted through the API. Deactivation keeps rows that reference
+the user (for example `tickets.created_by_user_id`) intact, and it can be
+reversed.
+
+### 14.3 Serialised protected changes (SQLite)
+
+Three operations are protected: account creation, role change and status
+change. Each must check, inside one transaction that no other protected
+change can interleave with:
+
+- that the change does not remove the last **active** administrator (role
+  `admin` and `is_active` true), for role and status changes;
+- that the acting administrator is still an active administrator (actor
+  revalidation). The request was authorised before the transaction started,
+  and a concurrent request may have demoted or deactivated the actor since
+  then.
+
+Counting and then updating separately is not enough. Two administrators
+deactivating each other at the same moment could each see two active
+administrators and both succeed.
+
+On SQLite, `SELECT ... FOR UPDATE` is not available, and the pysqlite driver
+does not open a transaction until the first write. Each protected change
+therefore begins with `BEGIN IMMEDIATE` (`_begin_serialised_change`), which
+takes SQLite's single write lock **before** anything is read. The transaction
+then:
+
+1. reads the IDs of the active administrators, then reloads the target row
+   (or, for creation, the actor's row), overwriting any stale copy loaded
+   during authorisation;
+2. applies the checks;
+3. writes and commits, or rolls back on any failure. The commit also happens
+   for a no-op, to release the lock.
+
+A concurrent protected change waits for the lock up to the connection's
+busy timeout. The application does not set one, so the Python `sqlite3`
+default of 5 seconds applies. If the lock is not released in time, the change
+fails with a safe `500` and writes nothing. A protected change refuses to run
+in a session that has already written in its current transaction
+(`TransactionAlreadyStartedError`), because `BEGIN IMMEDIATE` cannot be
+issued there. That is a programming error, never a client error.
+
+The self-modification check (`409`) happens before the transaction starts,
+because it needs no database state.
+
+**Account creation** (`create_user_as_admin`) performs actor revalidation,
+insertion and commit in the same protected transaction:
+
+1. `BEGIN IMMEDIATE`; reload the actor's row. The actor must exist, be active
+   and have exactly the role `admin`, otherwise `403` and nothing is written.
+2. `create_user(..., commit=False)` validates and normalises the fields,
+   checks for a duplicate email (case-insensitive), hashes the password and
+   inserts the row.
+3. Commit.
+
+**Trade-off: password hashing under the write lock.** Step 2 hashes the
+password while the SQLite write lock is held, so other writes (including
+other protected changes) wait for the duration of one hash. This is
+intentional: it keeps revalidation and insertion atomic, so an administrator
+whose access is removed concurrently cannot still create an account. The
+password length (12 to 128 characters) is validated before the request
+reaches the service, which bounds the hashing cost.
+
+### 14.4 PostgreSQL and other databases
+
+On databases with row locks, no `BEGIN IMMEDIATE` is issued. Instead the reads
+in step 1 use `SELECT ... FOR UPDATE`: first every active administrator row,
+in `id` order so that two changes cannot deadlock, then the target or actor
+row. A concurrent change blocks until the first commits and then re-reads the
+locked rows.
+
+**Status:** this has been verified only by checking the compiled SQL for the
+PostgreSQL dialect. Concurrency has **not** been tested against a live
+PostgreSQL server, and PostgreSQL is not yet a supported production database.
+In addition, recognising a duplicate email from the database's unique index
+(the case where two requests create the same email at the same moment) is
+implemented for SQLite's error only. Duplicates that already exist are found
+by a lookup before the insert on any database.
+
+### 14.5 Error handling
+
+- Expected outcomes map to fixed messages: `404` (user not found), `409`
+  (duplicate email, self-modification, last active administrator), `403`
+  (actor no longer an administrator).
+- The admin routes use a route class (`AdminRoute`) that removes submitted
+  values (`input`) from `422` validation errors, so passwords and smuggled
+  fields such as `password_hash` are never echoed back. The request models
+  also forbid extra fields.
+- Unexpected database errors reach the application's `SQLAlchemyError`
+  handler: the client receives `500 {"detail": "Internal server error."}`
+  and the server logs a short sanitised diagnostic without SQL, parameters or
+  a traceback. If a rollback also fails, the original error is reported and
+  the rollback failure is attached as a secondary failure.
+
+### 14.6 Audit logging
+
+`app/core/audit_logging.py` provides the dedicated `resolveai.audit` logger.
+The route module calls `log_admin_action` only after the change has committed,
+and only when something actually changed. Records contain the action
+(`user.create`, `user.role_change`, `user.activate`, `user.deactivate`),
+`actor_id`, `target_user_id` and the safe before/after role or status values.
+They never contain passwords, hashes, JWTs, names, emails or request bodies.
+
+`configure_audit_logging()` runs when `app.main` is imported, at every
+start-up and before every record, so the router also logs correctly if it is
+mounted in an application that never imports `app.main`. It is idempotent,
+thread-safe and respects operator configuration:
+
+- it re-enables the logger if a configuration disabled it;
+- it sets the level to `INFO` only while the level is unset;
+- only when the logger has **no** handlers does it add the default handler
+  (standard error, `UtcIsoFormatter`, UTC ISO-8601 timestamps) and set
+  `propagate` to `false`;
+- it never removes or changes operator handlers or `propagate`.
+
+Public helpers: `AUDIT_LOGGER_NAME`, `AUDIT_LOG_FORMAT`, `UtcIsoFormatter`,
+`get_audit_logger()`, `configure_audit_logging()` and
+`is_default_audit_handler()`. Operator configuration examples (own handler,
+`NullHandler` with `propagate: true` for root-only routing, and the need to
+state `propagate` explicitly when reconfiguring after import) are in the
+[README](../README.md#configuring-the-audit-logger).
+
+The audit log is a log stream, **not** a persistent database audit trail.
+Records are emitted after the commit and are not stored in the database.
+
+### 14.7 Tests
+
+- `tests/test_admin_users_api.py`: authentication and authorisation (`401`
+  and `403`), pagination, search and filters, validation, duplicate emails,
+  role and status semantics, administrator safeguards, concurrent changes on
+  a temporary SQLite file (including the same race without the lock, which
+  shows that the lock is needed), lock time-outs, rollback failures and audit
+  records.
+- `tests/test_audit_logging.py`: default output, timestamps, idempotence,
+  thread safety, operator handlers, levels and propagation, and real
+  `dictConfig` configurations applied in fresh interpreters before and after
+  import.

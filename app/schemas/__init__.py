@@ -10,6 +10,13 @@ from app.schemas.ticket import (
     TicketUpdate,
 )
 
+from app.schemas.admin import (
+    AdminUserCreate,
+    AdminUserListResponse,
+    AdminUserRoleUpdate,
+    AdminUserStatusUpdate,
+)
+
 __all__ = [
     "MessageResponse",
     "TokenResponse",
@@ -17,4 +24,8 @@ __all__ = [
     "TicketCreate",
     "TicketRead",
     "TicketUpdate",
+    "AdminUserCreate",
+    "AdminUserListResponse",
+    "AdminUserRoleUpdate",
+    "AdminUserStatusUpdate",
 ]
