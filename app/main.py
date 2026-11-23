@@ -12,6 +12,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.routes.auth import router as auth_router
 from app.api.routes.tickets import router as tickets_router
 from app.api.routes.analytics import router as analytics_router
+from app.api.routes.admin import router as admin_router
+from app.core.audit_logging import configure_audit_logging
 from app.db.database import engine
 from app.db.errors import (
     describe_database_error,
@@ -27,6 +29,11 @@ logger = logging.getLogger(__name__)
 
 DATABASE_ERROR_DETAIL = "Internal server error."
 
+# Administrative actions are logged at INFO, which an unconfigured logger
+# (or Uvicorn's default logging configuration) would drop. Configured here
+# so the audit log works even if the server does not run the lifespan.
+configure_audit_logging()
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -37,7 +44,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     connection reset can never print the database driver's message or a
     traceback. The filter is removed on shutdown, and re-attached if the
     application starts again.
+
+    The audit logger is configured again on every start-up (idempotent),
+    in case a logging configuration applied after import disabled it.
     """
+
+    configure_audit_logging()
 
     with sanitised_database_logs(engine):
         yield
@@ -114,6 +126,12 @@ app.include_router(
 app.include_router(
     analytics_router,
     prefix="/api/analytics",
+)
+
+# Register admin-only user management endpoints.
+app.include_router(
+    admin_router,
+    prefix="/api/admin",
 )
 
 

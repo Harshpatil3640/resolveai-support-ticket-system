@@ -19,6 +19,13 @@ The system allows support agents to create, manage and classify customer support
 - Password hashing.
 - Protected API endpoints.
 - Token revocation during logout.
+- Role-based access control with three roles: `admin`, `agent` and `customer`.
+
+### User Administration
+- Admin-only API to list, search, filter, retrieve and create user accounts.
+- Role changes and account activation/deactivation, effective immediately.
+- Safeguards against self-demotion, self-deactivation and removing the last active administrator.
+- Administrative actions recorded in a dedicated audit log (`resolveai.audit`).
 
 ### AI Ticket Classification
 - Automatic category prediction during ticket creation.
@@ -64,6 +71,7 @@ resolveai-support-ticket-system/
 ├── app/
 │   ├── api/
 │   │   └── routes/
+│   │       ├── admin.py
 │   │       ├── auth.py
 │   │       └── tickets.py
 │   │
@@ -295,6 +303,19 @@ All ticket endpoints require authentication.
 
 Ticket listing supports pagination, status, priority, category and text-search filters.
 
+### Administration (admin only)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/admin/users` | List, search and filter users |
+| GET | `/api/admin/users/{user_id}` | Retrieve a user |
+| POST | `/api/admin/users` | Create a user |
+| PATCH | `/api/admin/users/{user_id}/role` | Change a user's role |
+| PATCH | `/api/admin/users/{user_id}/status` | Activate or deactivate a user |
+
+Request and response details, security rules and error responses are in
+[Admin User Management](#admin-user-management).
+
 ### Example: Create a Ticket
 
 Endpoint:
@@ -509,10 +530,10 @@ real owner does. Requiring local access to the server and its database means
 only an operator who already controls the deployment can create the first
 administrator. Once one exists, the script permanently refuses to run.
 
-**Further administrators** will be created by an existing, signed-in
-administrator through the admin-only user-management API (planned; not yet
-available). Support agents can still be created locally with
-`python -m app.scripts.create_agent`.
+**Further administrators**, agents and customers are created by an existing,
+signed-in administrator through `POST /api/admin/users` (see
+[Admin User Management](#admin-user-management)). Support agents can still be
+created locally with `python -m app.scripts.create_agent`.
 
 Choose a strong, unique password when prompted. Never commit credentials,
 and never share the administrator's password.
@@ -533,8 +554,476 @@ a single transaction, so either both changes happen or neither does.
 
 Passwords must be 12 to 128 characters long. The limits are enforced by the
 shared user service (`app/services/user_service.py`), whatever the caller.
-Future HTTP request schemas that accept a password must also declare
-`max_length=128`, so oversized values are rejected before hashing.
+HTTP request schemas that accept a password (such as the admin create-user
+request) must also declare `max_length=128`, so oversized values are rejected
+before hashing.
+
+## Admin User Management
+
+The admin user-management API (`app/api/routes/admin.py`, mounted at
+`/api/admin`) lets an active administrator manage accounts over HTTP. The
+business rules live in the shared user service
+(`app/services/user_service.py`); the design of the protected transactions is
+described in [docs/architecture.md](docs/architecture.md#14-admin-user-management).
+
+### Roles
+
+| Role | Stored value | User-management API |
+|---|---|---|
+| Administrator | `admin` | Allowed while the account is active |
+| Support agent | `agent` | Forbidden (`403`) |
+| Customer | `customer` | Forbidden (`403`) |
+
+Role values are lowercase and case-sensitive (`"Admin"` is rejected). A stored
+role the application does not recognise is denied by default.
+
+### Authentication and authorisation
+
+Every endpoint under `/api/admin` requires an access token from
+`POST /api/auth/login` (form fields `username` = email, and `password`),
+sent as `Authorization: Bearer <access-token>`. In Swagger UI
+(`http://127.0.0.1:8000/docs`) use the **Authorize** button.
+
+| Situation | Status | Response body |
+|---|---|---|
+| No `Authorization` header | `401` | `{"detail": "Not authenticated"}` |
+| Invalid, expired or revoked token, inactive account, or a token issued before the account's sessions were invalidated | `401` | `{"detail": "Could not validate credentials."}` |
+| Valid token, but the account is not an administrator | `403` | `{"detail": "You do not have permission to perform this action."}` |
+
+`401` responses include the header `WWW-Authenticate: Bearer`. Authorisation is
+checked before the request is validated, so a non-administrator receives `403`
+(never `422`) and cannot use validation errors to probe the API. The
+administrator requirement is attached to the whole router, so any endpoint
+added to it later is protected too.
+
+The user and role are loaded from the database on every request; the role is
+never read from the token.
+
+### Response model
+
+Every endpoint that returns a user uses the same model:
+
+```json
+{
+  "id": 3,
+  "name": "Jordan Example",
+  "email": "jordan.example@example.com",
+  "role": "agent",
+  "is_active": true,
+  "created_at": "2026-11-23T05:12:16.456996"
+}
+```
+
+`password`, `password_hash` and `token_version` are never returned.
+
+### `GET /api/admin/users` — list, search and filter users
+
+Query parameters (all optional):
+
+| Parameter | Type | Default | Rules |
+|---|---|---|---|
+| `skip` | integer | `0` | Number of matching users to skip; must be `0` or greater |
+| `limit` | integer | `20` | Page size, `1` to `100` |
+| `search` | string | none | `1` to `200` characters; case-insensitive substring match on **name or email** |
+| `role` | `admin` \| `agent` \| `customer` | none | Exact role filter |
+| `is_active` | boolean | none | `true` for active accounts, `false` for deactivated accounts |
+
+- Filters combine with AND, for example `role=agent&is_active=false`.
+- `search` is trimmed. A value of only spaces is ignored, but an empty value
+  (`search=`) is rejected with `422`. `%` and `_` match literally; they are
+  not wildcards.
+- Results are ordered newest first by `created_at`, then by `id` (both
+  descending), so pages are stable even when accounts share a creation time.
+- `total` is the number of users matching the filters before `skip` and
+  `limit` are applied.
+
+Example request:
+
+```http
+GET /api/admin/users?search=example.com&role=agent&is_active=true&skip=0&limit=20
+Authorization: Bearer <admin-access-token>
+```
+
+Response `200 OK`:
+
+```json
+{
+  "items": [
+    {
+      "id": 3,
+      "name": "Jordan Example",
+      "email": "jordan.example@example.com",
+      "role": "agent",
+      "is_active": true,
+      "created_at": "2026-11-23T05:12:16.456996"
+    }
+  ],
+  "total": 1,
+  "skip": 0,
+  "limit": 20
+}
+```
+
+Errors: `401`, `403`, and `422` for an out-of-range `skip` or `limit`, an
+empty or over-long `search`, an unknown `role` or a non-boolean `is_active`.
+
+### `GET /api/admin/users/{user_id}` — retrieve a user
+
+`user_id` must be a positive integer.
+
+```http
+GET /api/admin/users/3
+Authorization: Bearer <admin-access-token>
+```
+
+Response `200 OK`: the user (see [Response model](#response-model)).
+
+Errors: `401`, `403`, `404 {"detail": "User not found."}`, and `422` if
+`user_id` is not a positive integer.
+
+### `POST /api/admin/users` — create a user
+
+Request body (all four fields are required; there is no default role):
+
+| Field | Rules |
+|---|---|
+| `name` | Trimmed; 1 to 100 characters |
+| `email` | Trimmed and lowercased; at most 255 characters; exactly one `@` with text on both sides and no spaces; unique, compared case-insensitively |
+| `password` | 12 to 128 characters; kept exactly as typed (spaces are **not** trimmed) |
+| `role` | `admin`, `agent` or `customer` |
+
+Any other field (for example `is_active`, `password_hash` or
+`token_version`) is rejected with `422`. New accounts are always active.
+
+```http
+POST /api/admin/users
+Authorization: Bearer <admin-access-token>
+Content-Type: application/json
+
+{
+  "name": "Jordan Example",
+  "email": "Jordan.Example@example.com",
+  "password": "<a 12-128 character password>",
+  "role": "agent"
+}
+```
+
+Response `201 Created`: the new user, with the email stored as
+`jordan.example@example.com`.
+
+Errors:
+
+| Status | When | Body |
+|---|---|---|
+| `401` / `403` | See [Authentication and authorisation](#authentication-and-authorisation) | |
+| `403` | The acting administrator was demoted or deactivated after the request was authorised (re-checked inside the creating transaction; nothing is created) | `{"detail": "You do not have permission to perform this action."}` |
+| `409` | An account with this email already exists (any letter case) | `{"detail": "An account with this email already exists."}` |
+| `422` | Field missing, wrong type, out of range, or not permitted | FastAPI validation list (see [Validation errors](#validation-errors)) |
+| `422` | The email address is not valid | `{"detail": "A valid email address is required."}` |
+
+### `PATCH /api/admin/users/{user_id}/role` — change a user's role
+
+```http
+PATCH /api/admin/users/3/role
+Authorization: Bearer <admin-access-token>
+Content-Type: application/json
+
+{"role": "customer"}
+```
+
+Response `200 OK`: the updated user.
+
+- The change applies **immediately**, including to tokens the user already
+  holds: a promoted user can use the admin API with their existing token,
+  and a demoted administrator receives `403` on their next request. A role
+  change does not sign the user out.
+- Setting the role the user already has is a no-op: `200`, nothing is
+  written and nothing is logged.
+
+Errors:
+
+| Status | When | Body |
+|---|---|---|
+| `401` / `403` | See [Authentication and authorisation](#authentication-and-authorisation); `403` also if the acting administrator lost access before the change | `{"detail": "You do not have permission to perform this action."}` |
+| `404` | No such user | `{"detail": "User not found."}` |
+| `409` | `user_id` is the acting administrator | `{"detail": "Administrators cannot change their own role."}` |
+| `409` | The change would demote the last active administrator | `{"detail": "At least one active administrator must remain."}` |
+| `422` | Missing or unknown `role`, extra fields, or invalid `user_id` | FastAPI validation list |
+
+### `PATCH /api/admin/users/{user_id}/status` — activate or deactivate a user
+
+`is_active` must be a JSON boolean; `"false"`, `0` and similar values are
+rejected with `422`.
+
+```http
+PATCH /api/admin/users/3/status
+Authorization: Bearer <admin-access-token>
+Content-Type: application/json
+
+{"is_active": false}
+```
+
+Response `200 OK`: the updated user.
+
+- A real status change increments the user's `token_version` in the same
+  transaction, so **every token issued before the change stops working**
+  (`401`). This also applies to **reactivation**: tokens issued before a
+  deactivation never become valid again, and the user must sign in again.
+- Repeating the current status is idempotent: `200`, nothing is written,
+  `token_version` is not incremented and nothing is logged.
+- A deactivated account cannot sign in or use existing tokens.
+
+Errors:
+
+| Status | When | Body |
+|---|---|---|
+| `401` / `403` | See [Authentication and authorisation](#authentication-and-authorisation); `403` also if the acting administrator lost access before the change | `{"detail": "You do not have permission to perform this action."}` |
+| `404` | No such user | `{"detail": "User not found."}` |
+| `409` | `user_id` is the acting administrator | `{"detail": "Administrators cannot change their own status."}` |
+| `409` | The change would deactivate the last active administrator | `{"detail": "At least one active administrator must remain."}` |
+| `422` | Missing or non-boolean `is_active`, extra fields, or invalid `user_id` | FastAPI validation list |
+
+### Administrator safeguards
+
+- **No self-demotion or self-deactivation.** An administrator cannot change
+  their own role or status (`409`); another administrator must do it.
+- **At least one active administrator always remains.** Demoting or
+  deactivating the last active administrator is refused (`409`). Only
+  accounts that are active and have the role `admin` count; an inactive
+  administrator can be demoted freely.
+- **The acting administrator is re-validated.** Each create, role change and
+  status change re-checks, inside its protected transaction, that the actor is
+  still an active administrator. If a concurrent request removed their access
+  after the request was authorised, the change is refused with `403` and
+  nothing is written.
+- These checks and the write happen in one serialised transaction, so two
+  administrators removing each other at the same moment cannot leave the
+  system without an active administrator. See
+  [docs/architecture.md](docs/architecture.md#14-admin-user-management).
+
+### Why accounts are deactivated, not deleted
+
+The API has no endpoint for deleting users. Deactivation:
+
+- immediately blocks sign-in and revokes every existing token;
+- is reversible through the same endpoint;
+- keeps the records that refer to the account intact, such as the tickets it
+  created (`tickets.created_by_user_id`), and keeps the user IDs in the audit
+  log meaningful.
+
+### Validation errors
+
+Request validation failures return `422` in FastAPI's list format, but **the
+submitted values are never echoed back** (no `input` field), so a rejected
+password or smuggled field never appears in a response:
+
+```json
+{
+  "detail": [
+    {
+      "type": "string_too_short",
+      "loc": ["body", "password"],
+      "msg": "String should have at least 12 characters",
+      "ctx": {"min_length": 12}
+    },
+    {
+      "type": "extra_forbidden",
+      "loc": ["body", "is_active"],
+      "msg": "Extra inputs are not permitted"
+    }
+  ]
+}
+```
+
+Rules checked by the user service (such as the email format) return a fixed
+message instead: `{"detail": "A valid email address is required."}`.
+
+Unexpected database errors return `500 {"detail": "Internal server error."}`.
+The driver's message and SQL are never sent to the client, and the server
+logs only a short sanitised diagnostic. If a protected change cannot obtain
+the database write lock in time, it also fails with this `500` and changes
+nothing.
+
+### Operational limitations
+
+- Protected changes are serialised with SQLite's `BEGIN IMMEDIATE`. PostgreSQL
+  row locking is implemented but has **not** been tested against a live
+  PostgreSQL server, and PostgreSQL is not a supported production database
+  yet.
+- While an account is being created, its password is hashed with the SQLite
+  write lock held, so other writes wait for that brief period.
+- The audit log is a log stream, not a database audit trail (see
+  [Audit Logging](#audit-logging)).
+
+## Audit Logging
+
+Every successful administrative change is recorded through the dedicated
+`resolveai.audit` logger (`app/core/audit_logging.py`), after its transaction
+has committed.
+
+### What is logged
+
+| Action | Logged when | Extra fields |
+|---|---|---|
+| `user.create` | An account is created | `role`, `is_active` |
+| `user.role_change` | A role actually changes | `role_before`, `role_after` |
+| `user.deactivate` | An active account is deactivated | `is_active_before`, `is_active_after` |
+| `user.activate` | A deactivated account is reactivated | `is_active_before`, `is_active_after` |
+
+Every record also contains `actor_id` (the administrator) and
+`target_user_id`. Rejected requests and no-op changes (same role or same
+status) are not logged as actions. A stored role the application does not
+recognise is logged as `unrecognised`.
+
+Records **never** contain passwords, password hashes, JWTs, names, emails or
+request bodies.
+
+Default output (one line per action, on standard error):
+
+```text
+2026-11-23T05:12:16.456Z INFO resolveai.audit: admin_action action=user.create actor_id=1 target_user_id=3 role=agent is_active=True
+2026-11-23T05:12:16.644Z INFO resolveai.audit: admin_action action=user.deactivate actor_id=1 target_user_id=2 is_active_before=True is_active_after=False
+```
+
+The same fields are attached to each log record as a dictionary,
+`record.admin_action`, for handlers or formatters that build structured
+output themselves.
+
+### Default behaviour
+
+`configure_audit_logging()` runs when `app.main` is imported, at every
+application start-up and before every audit record. It is idempotent and
+never overrides operator configuration:
+
+- **Output:** if the `resolveai.audit` logger has no handlers, one handler is
+  added that writes to standard error (where Uvicorn writes its server log),
+  and `propagate` is set to `false` so a root handler does not print each
+  record twice.
+- **Level:** `INFO`, but only if no level was configured. An explicit level
+  (for example `WARNING`) is kept.
+- **Timestamps:** UTC ISO-8601 with milliseconds, for example
+  `2026-11-23T05:12:16.456Z`, independent of the server's time zone.
+- **Operator configuration is respected:** handlers you configure, your level
+  and your `propagate` value are never removed or changed, and the default
+  handler is never added next to your handlers.
+- The logger is re-enabled if a configuration with
+  `disable_existing_loggers: true` disabled it.
+
+Without this, Python would drop INFO records from an unconfigured logger, and
+Uvicorn's default logging configuration only configures its own loggers.
+
+### Configuring the audit logger
+
+Pass a JSON logging configuration to Uvicorn with `--log-config`. Uvicorn
+applies it before it imports the application. A configuration given with
+`--log-config` replaces Uvicorn's default logging configuration, so include
+handlers for the other logs you need too.
+
+**Send audit records to their own destination**, for example a file collected
+by an external log-shipping agent. Save as `logging.json`:
+
+```json
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "audit": {
+      "()": "app.core.audit_logging.UtcIsoFormatter",
+      "fmt": "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    },
+    "console": {
+      "format": "%(levelname)s %(name)s: %(message)s"
+    }
+  },
+  "handlers": {
+    "audit_file": {
+      "class": "logging.FileHandler",
+      "filename": "audit.log",
+      "encoding": "utf-8",
+      "formatter": "audit"
+    },
+    "console": {
+      "class": "logging.StreamHandler",
+      "stream": "ext://sys.stderr",
+      "formatter": "console"
+    }
+  },
+  "root": {"level": "INFO", "handlers": ["console"]},
+  "loggers": {
+    "resolveai.audit": {
+      "level": "INFO",
+      "handlers": ["audit_file"],
+      "propagate": false
+    }
+  }
+}
+```
+
+```cmd
+python -m uvicorn app.main:app --log-config logging.json
+```
+
+`UtcIsoFormatter` (`app.core.audit_logging.UtcIsoFormatter`) is a standard
+`logging.Formatter` whose `%(asctime)s` is UTC ISO-8601. When it is used
+through `"()"`, the format string key is `fmt`, not `format`. To feed a
+pipeline that reads standard output, replace the file handler with a
+`logging.StreamHandler` using `"stream": "ext://sys.stdout"`. `*.log` files are
+already ignored by Git.
+
+**Route audit records only through the root logger's handlers** (for example a
+single application-wide pipeline). Give the audit logger a `NullHandler` and
+`propagate: true`:
+
+```json
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "utc": {
+      "()": "app.core.audit_logging.UtcIsoFormatter",
+      "fmt": "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    }
+  },
+  "handlers": {
+    "pipeline": {
+      "class": "logging.StreamHandler",
+      "stream": "ext://sys.stdout",
+      "formatter": "utc"
+    },
+    "null": {"class": "logging.NullHandler"}
+  },
+  "root": {"level": "INFO", "handlers": ["pipeline"]},
+  "loggers": {
+    "resolveai.audit": {
+      "handlers": ["null"],
+      "propagate": true
+    }
+  }
+}
+```
+
+The `NullHandler` is required: a logger with no handlers at all receives the
+default standard-error handler (with `propagate: false`).
+
+**Quieter output:** setting the audit logger's `level` above `INFO` (for
+example `"WARNING"`) is respected, but because all audit records are INFO,
+it turns the audit log off.
+
+**Reconfiguring after import.** If your code calls
+`logging.config.dictConfig` after `app.main` has been imported, the default
+handler has already set `propagate` to `false`, and `dictConfig` keeps that
+value when the key is omitted. In that case **always state `propagate`
+explicitly** for `resolveai.audit`; otherwise, for example, the root-only
+configuration above silently drops every audit record.
+
+### What the audit log is not
+
+The audit log is an operational log stream, **not a persistent database audit
+trail**. Nothing is stored in the database, the default output on standard
+error is kept only if the process manager keeps it, and records are written
+after the commit, so a committed change can be missing from the log if the
+process stops or logging fails at that moment. If you need durable audit
+records, send them to durable storage with your own handler.
 
 ## Running Tests
 
@@ -544,7 +1033,34 @@ Execute the complete automated test suite:
 python -m pytest -v
 ```
 
-The current project test suite contains 79 passing tests.
+The current project test suite contains 680 passing tests.
+
+Run only the admin user-management API tests (endpoints, safeguards,
+concurrency and error handling):
+
+```cmd
+python -m pytest tests/test_admin_users_api.py -v
+```
+
+Run only the audit-logging tests (default output, operator configuration and
+fresh-process scenarios):
+
+```cmd
+python -m pytest tests/test_audit_logging.py -v
+```
+
+The admin and audit tests use in-memory or temporary SQLite databases and
+never touch `resolveai.db`. The audit tests start fresh Python interpreters to
+apply real logging configurations, so they take longer than the others.
+As for running the application, `SECRET_KEY` (at least 32 characters) must be
+set, normally in `.env` (see `.env.example`).
+
+To run the application locally, follow
+[8. Run the FastAPI application](#8-run-the-fastapi-application):
+
+```cmd
+python -m uvicorn app.main:app --reload
+```
 
 AI integration tests cover:
 
@@ -594,6 +1110,9 @@ Implemented:
 - ML model experiments and evaluation
 - AI ticket category prediction
 - Human-in-the-loop category correction
+- Role-based access control (`admin`, `agent`, `customer`)
+- Admin user management API with administrator safeguards
+- Audit logging of administrative actions (log stream only)
 - Automated API and integration tests
 
 Further development:
@@ -601,6 +1120,8 @@ Further development:
 - Ticket analytics and reporting
 - Model monitoring and retraining workflow
 - Evaluation using real-world support-ticket data
+- Concurrency testing of admin changes against a live PostgreSQL server
+- A persistent (database-backed) audit trail
 
 ## Author
 
