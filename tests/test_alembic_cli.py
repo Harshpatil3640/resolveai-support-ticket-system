@@ -35,7 +35,7 @@ from app.db.migrations import (
 )
 
 
-HEAD_REVISION = "0002"
+HEAD_REVISION = "0003"
 
 FAKE_HASH = "$argon2id$v=19$m=65536,t=3,p=4$ZmFrZS1zYWx0$ZmFrZS1oYXNoLXZhbHVl"
 RAW_DRIVER_TEXT = "driver detail leaked"
@@ -570,11 +570,12 @@ def test_mistyped_destination_keeps_alembics_own_message(
 
     assert _alembic(tmp_path, database_file, "upgrade", "head").returncode == 0
 
-    result = _alembic(tmp_path, database_file, "upgrade", "0003")
+    # A revision ID that does not exist in alembic/versions.
+    result = _alembic(tmp_path, database_file, "upgrade", "0099")
     output = result.stdout + result.stderr
 
     assert result.returncode == ALEMBIC_FAILURE_EXIT_CODE, output
-    assert "FAILED: Can't locate revision identified by '0003'" in output
+    assert "FAILED: Can't locate revision identified by '0099'" in output
     assert SAFE_UNKNOWN_REVISION_MESSAGE not in output
     assert "Traceback" not in output
     assert _revisions(database_file) == [HEAD_REVISION]
@@ -660,6 +661,7 @@ def test_upgrade_downgrade_and_stamp_still_work(tmp_path: Path) -> None:
         "alembic_version",
         "users",
         "tickets",
+        "ticket_events",
         "revoked_tokens",
     }
     assert _revisions(database_file) == [HEAD_REVISION]

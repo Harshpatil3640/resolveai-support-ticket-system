@@ -269,6 +269,105 @@
     font-size: 11px;
 }
 
+/* Admin: five cards (global statistics + unassigned). */
+.stats-grid.stats-grid-5 {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.stat-card {
+    display: flex;
+    flex-direction: column;
+}
+
+.stat-card-link {
+    align-self: flex-start;
+    margin-top: auto;
+    padding-top: 12px;
+    color: #4779e8;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.stat-card-link:hover,
+.stat-card-link:focus-visible {
+    color: #2f5fcf;
+    text-decoration: underline;
+}
+
+
+/* =========================================
+   QUICK LINKS
+========================================= */
+
+.quick-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: -12px 0 30px;
+}
+
+.quick-links .btn {
+    padding: 8px 15px;
+    border: 1px solid #e9edf3;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #46536a;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.quick-links .btn:hover {
+    border-color: #4779e8;
+    color: #4779e8;
+}
+
+
+/* =========================================
+   CONTAINED ALERTS (WITH RETRY)
+========================================= */
+
+.dashboard-alert {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+}
+
+.dashboard-retry-button {
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.empty-state-text {
+    margin: 0;
+}
+
+.empty-state .btn {
+    margin-top: 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+
+/* =========================================
+   ASSIGNMENT LABELS (dashboard + tickets page)
+========================================= */
+
+.assignee-label {
+    color: #46536a;
+    font-weight: 600;
+}
+
+.assignee-label.is-unassigned {
+    color: #8491a5;
+    font-weight: 400;
+    font-style: italic;
+}
+
 
 /* =========================================
    RECENT TICKETS SECTION
@@ -397,6 +496,10 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
+    .stats-grid.stats-grid-5 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
     .dashboard-content {
         padding: 30px;
     }
@@ -477,9 +580,14 @@
         padding: 25px 20px;
     }
 
-    .stats-grid {
+    .stats-grid,
+    .stats-grid.stats-grid-5 {
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 12px;
+    }
+
+    .quick-links {
+        margin-top: -20px;
     }
 
     .stat-card {
@@ -503,7 +611,8 @@
 
 @media (max-width: 420px) {
 
-    .stats-grid {
+    .stats-grid,
+    .stats-grid.stats-grid-5 {
         grid-template-columns: 1fr;
     }
 

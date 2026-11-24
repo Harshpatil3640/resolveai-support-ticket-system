@@ -1115,3 +1115,438 @@ def test_reset_password_write_failure_stays_primary_with_driver_rollback_failure
 
         assert verify_password(PASSWORD, stored.password_hash)
         assert stored.token_version == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5: user administration unassigns tickets atomically
+# ---------------------------------------------------------------------------
+
+
+def _staff_user(db: Session, label: str, role: str) -> User:
+    user = User(
+        name=f"{label} name",
+        email=f"{label}@example.test",
+        password_hash="unused-hash",
+        role=role,
+    )
+    db.add(user)
+    db.commit()
+
+    return user
+
+
+@pytest.fixture
+def staff(db_session: Session) -> dict[str, User]:
+    return {
+        label: _staff_user(db_session, label, role)
+        for label, role in [
+            ("admin", "admin"),
+            ("agent", "agent"),
+            ("other", "agent"),
+            ("customer", "customer"),
+        ]
+    }
+
+
+def _add_ticket(
+    db: Session,
+    creator: User,
+    *,
+    status: str,
+    assignee: User | None,
+) -> int:
+    ticket = Ticket(
+        title=f"{status} ticket",
+        description="User administration integration test.",
+        created_by_user_id=creator.id,
+        status=status,
+        assigned_to_user_id=None if assignee is None else assignee.id,
+    )
+    db.add(ticket)
+    db.commit()
+
+    return ticket.id
+
+
+@pytest.fixture
+def agent_tickets(db_session: Session, staff: dict[str, User]) -> dict[str, int]:
+    """Ticket IDs, created in this order (ascending IDs)."""
+
+    agent, other, creator = staff["agent"], staff["other"], staff["customer"]
+
+    return {
+        "in_progress": _add_ticket(db_session, creator, status="In Progress", assignee=agent),
+        "resolved": _add_ticket(db_session, creator, status="Resolved", assignee=agent),
+        "open": _add_ticket(db_session, creator, status="Open", assignee=agent),
+        "others": _add_ticket(db_session, creator, status="Open", assignee=other),
+        "unassigned": _add_ticket(db_session, creator, status="Open", assignee=None),
+    }
+
+
+def _ticket_states(db: Session) -> dict[int, tuple]:
+    """{ticket id: (assignee, status, version)} straight from SQL."""
+
+    return {
+        row[0]: tuple(row[1:])
+        for row in db.execute(
+            text(
+                "SELECT id, assigned_to_user_id, status, version FROM tickets"
+            )
+        )
+    }
+
+
+def _ticket_event_rows(db: Session) -> list[tuple]:
+    return [
+        tuple(row)
+        for row in db.execute(
+            text(
+                "SELECT ticket_id, event_type, actor_user_id, from_assignee_id, "
+                "to_assignee_id, from_status, to_status, reason "
+                "FROM ticket_events ORDER BY id"
+            )
+        )
+    ]
+
+
+def _user_row(db: Session, user: User) -> tuple:
+    return tuple(
+        db.execute(
+            text("SELECT role, is_active, token_version FROM users WHERE id = :id"),
+            {"id": user.id},
+        ).one()
+    )
+
+
+def _deactivate(db: Session, staff: dict[str, User], who: str = "agent"):
+    return user_service.set_user_active_status(
+        db, actor_id=staff["admin"].id, user_id=staff[who].id, is_active=False
+    )
+
+
+def test_deactivating_an_agent_unassigns_their_unresolved_tickets(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+) -> None:
+    before = _ticket_states(db_session)
+    admin, agent = staff["admin"].id, staff["agent"].id
+
+    change = _deactivate(db_session, staff)
+
+    assert change.changed is True
+    # Ascending ticket IDs: processed deterministically.
+    assert change.unassigned_ticket_ids == (
+        agent_tickets["in_progress"],
+        agent_tickets["open"],
+    )
+
+    after = _ticket_states(db_session)
+
+    # In Progress returns to Open; Open stays Open; each bumped once.
+    assert after[agent_tickets["in_progress"]] == (None, "Open", 2)
+    assert after[agent_tickets["open"]] == (None, "Open", 2)
+
+    # Resolved, other agents' and unassigned tickets are untouched.
+    for name in ("resolved", "others", "unassigned"):
+        assert after[agent_tickets[name]] == before[agent_tickets[name]]
+
+    assert _ticket_event_rows(db_session) == [
+        (agent_tickets["in_progress"], "unassigned", admin, agent, None,
+         "In Progress", "Open", "assignee_deactivated"),
+        (agent_tickets["open"], "unassigned", admin, agent, None,
+         None, None, "assignee_deactivated"),
+    ]
+    # The Phase 6 status change itself is unchanged.
+    assert _user_row(db_session, staff["agent"]) == ("agent", 0, 1)
+
+
+def test_reactivation_does_not_restore_assignments(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+) -> None:
+    _deactivate(db_session, staff)
+    after_deactivation = _ticket_states(db_session)
+    events = _ticket_event_rows(db_session)
+
+    change = user_service.set_user_active_status(
+        db_session,
+        actor_id=staff["admin"].id,
+        user_id=staff["agent"].id,
+        is_active=True,
+    )
+
+    assert change.changed is True
+    assert change.unassigned_ticket_ids == ()
+    assert _ticket_states(db_session) == after_deactivation
+    assert _ticket_event_rows(db_session) == events
+    assert _user_row(db_session, staff["agent"]) == ("agent", 1, 2)
+
+
+def test_repeated_deactivation_changes_no_ticket(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+) -> None:
+    _deactivate(db_session, staff)
+    states = _ticket_states(db_session)
+    events = _ticket_event_rows(db_session)
+
+    repeated = _deactivate(db_session, staff)
+
+    assert (repeated.changed, repeated.unassigned_ticket_ids) == (False, ())
+    assert _ticket_states(db_session) == states
+    assert _ticket_event_rows(db_session) == events
+    assert _user_row(db_session, staff["agent"]) == ("agent", 0, 1)
+
+
+def test_deactivating_any_account_leaves_no_unresolved_ticket_with_it(
+    db_session: Session,
+    staff: dict[str, User],
+) -> None:
+    """Legacy data: a non-agent holding a ticket (e.g. demoted before 7.5)."""
+
+    second_admin = _staff_user(db_session, "admin2", "admin")
+    ticket_id = _add_ticket(
+        db_session, staff["customer"], status="Open", assignee=second_admin
+    )
+
+    change = _deactivate(db_session, {**staff, "admin2": second_admin}, "admin2")
+
+    assert change.unassigned_ticket_ids == (ticket_id,)
+    assert _ticket_states(db_session)[ticket_id] == (None, "Open", 2)
+
+
+@pytest.mark.parametrize("new_role", ["customer", "admin"])
+def test_agent_losing_the_agent_role_unassigns_their_tickets(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+    new_role: str,
+) -> None:
+    before = _ticket_states(db_session)
+    admin, agent = staff["admin"].id, staff["agent"].id
+
+    change = user_service.change_user_role(
+        db_session, actor_id=admin, user_id=agent, role=new_role
+    )
+
+    assert (change.previous_role, change.new_role) == ("agent", new_role)
+    assert change.unassigned_ticket_ids == (
+        agent_tickets["in_progress"],
+        agent_tickets["open"],
+    )
+
+    after = _ticket_states(db_session)
+
+    assert after[agent_tickets["in_progress"]] == (None, "Open", 2)
+    assert after[agent_tickets["open"]] == (None, "Open", 2)
+
+    for name in ("resolved", "others", "unassigned"):
+        assert after[agent_tickets[name]] == before[agent_tickets[name]]
+
+    assert [row[-1] for row in _ticket_event_rows(db_session)] == [
+        "assignee_role_changed",
+        "assignee_role_changed",
+    ]
+    # Role changes still do not increment token_version.
+    assert _user_row(db_session, staff["agent"]) == (new_role, 1, 0)
+
+
+@pytest.mark.parametrize("old_role", ["customer", "admin"])
+def test_becoming_an_agent_touches_no_ticket(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+    old_role: str,
+) -> None:
+    user = _staff_user(db_session, f"becoming-{old_role}", old_role)
+    # Legacy data: the user already holds an unresolved ticket.
+    held = _add_ticket(db_session, staff["customer"], status="In Progress", assignee=user)
+    before = _ticket_states(db_session)
+
+    change = user_service.change_user_role(
+        db_session, actor_id=staff["admin"].id, user_id=user.id, role="agent"
+    )
+
+    assert (change.changed, change.unassigned_ticket_ids) == (True, ())
+    assert _ticket_states(db_session) == before
+    assert before[held] == (user.id, "In Progress", 1)
+    assert _ticket_event_rows(db_session) == []
+
+
+@pytest.mark.parametrize(
+    ("who", "role"),
+    [("agent", "agent"), ("customer", "admin")],
+    ids=["repeated-agent-role", "customer-to-admin"],
+)
+def test_role_changes_that_keep_assignability_touch_no_ticket(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+    who: str,
+    role: str,
+) -> None:
+    before = _ticket_states(db_session)
+
+    change = user_service.change_user_role(
+        db_session, actor_id=staff["admin"].id, user_id=staff[who].id, role=role
+    )
+
+    assert change.unassigned_ticket_ids == ()
+    assert _ticket_states(db_session) == before
+    assert _ticket_event_rows(db_session) == []
+
+
+USER_CHANGES = {
+    "deactivate": lambda db, staff: _deactivate(db, staff),
+    "demote": lambda db, staff: user_service.change_user_role(
+        db, actor_id=staff["admin"].id, user_id=staff["agent"].id, role="customer"
+    ),
+}
+
+
+@pytest.mark.parametrize("change", list(USER_CHANGES))
+def test_event_failure_rolls_back_the_user_change_and_every_ticket(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    from app.services import ticket_workflow
+
+    tickets_before = _ticket_states(db_session)
+    user_before = _user_row(db_session, staff["agent"])
+    failure = RuntimeError("event insertion failed")
+    calls = []
+    real_record = ticket_workflow.record_ticket_event
+
+    def fail_on_second(*args, **kwargs):
+        # The first ticket's change and event are already in the session.
+        calls.append(kwargs["ticket_id"])
+
+        if len(calls) == 2:
+            raise failure
+
+        return real_record(*args, **kwargs)
+
+    monkeypatch.setattr(ticket_workflow, "record_ticket_event", fail_on_second)
+
+    with pytest.raises(RuntimeError) as error:
+        USER_CHANGES[change](db_session, staff)
+
+    assert error.value is failure
+    assert len(calls) == 2
+    assert _ticket_states(db_session) == tickets_before
+    assert _ticket_event_rows(db_session) == []
+    assert _user_row(db_session, staff["agent"]) == user_before
+
+
+@pytest.mark.parametrize("change", list(USER_CHANGES))
+def test_commit_failure_rolls_back_user_tickets_and_history(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    tickets_before = _ticket_states(db_session)
+    user_before = _user_row(db_session, staff["agent"])
+    commit_error = OperationalError("COMMIT", None, sqlite3.OperationalError("io"))
+
+    def flush_then_fail() -> None:
+        db_session.flush()
+        # Everything reached the database inside the transaction...
+        assert len(_ticket_event_rows(db_session)) == 2
+        raise commit_error
+
+    monkeypatch.setattr(db_session, "commit", flush_then_fail)
+
+    with pytest.raises(OperationalError) as error:
+        USER_CHANGES[change](db_session, staff)
+
+    assert error.value is commit_error
+
+    monkeypatch.undo()
+
+    # ...and none of it survived the rollback.
+    assert _ticket_states(db_session) == tickets_before
+    assert _ticket_event_rows(db_session) == []
+    assert _user_row(db_session, staff["agent"]) == user_before
+
+
+@pytest.mark.parametrize("change", list(USER_CHANGES))
+def test_rollback_failure_keeps_the_original_error(
+    db_session: Session,
+    staff: dict[str, User],
+    agent_tickets: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    commit_error = OperationalError("COMMIT", None, sqlite3.OperationalError("io"))
+    monkeypatch.setattr(db_session, "commit", _raise_with(commit_error))
+    monkeypatch.setattr(
+        db_session, "rollback", _raise_with(RuntimeError("rollback failed"))
+    )
+
+    with pytest.raises(OperationalError) as error:
+        USER_CHANGES[change](db_session, staff)
+
+    assert error.value is commit_error
+    assert isinstance(rollback_failure_of(error.value), RuntimeError)
+
+    monkeypatch.undo()
+    db_session.rollback()
+
+    assert _ticket_event_rows(db_session) == []
+
+
+def _raise_with(error: BaseException):
+    def _raise(*_args, **_kwargs):
+        raise error
+
+    return _raise
+
+
+def test_many_tickets_are_unassigned_in_id_order_with_one_version_bump(
+    db_session: Session,
+    staff: dict[str, User],
+) -> None:
+    statuses = ["Open", "In Progress", "Resolved", "In Progress", "Open", "Open"]
+    ids = [
+        _add_ticket(db_session, staff["customer"], status=status, assignee=staff["agent"])
+        for status in statuses
+    ]
+
+    change = _deactivate(db_session, staff)
+
+    unresolved = [i for i, s in zip(ids, statuses) if s != "Resolved"]
+
+    assert list(change.unassigned_ticket_ids) == unresolved
+    assert [row[0] for row in _ticket_event_rows(db_session)] == unresolved
+
+    states = _ticket_states(db_session)
+
+    for ticket_id, status in zip(ids, statuses):
+        if status == "Resolved":
+            assert states[ticket_id] == (staff["agent"].id, "Resolved", 1)
+        else:
+            assert states[ticket_id] == (None, "Open", 2)
+
+
+def test_shared_admin_lock_query_is_used_by_both_services() -> None:
+    from app.services import ticket_workflow, user_locking
+
+    assert (
+        user_service._active_administrators_for_update
+        is user_locking.active_administrator_ids_for_update
+    )
+    assert user_service.lock_active_administrator_ids is (
+        user_locking.lock_active_administrator_ids
+    )
+    assert ticket_workflow.lock_active_administrator_ids is (
+        user_locking.lock_active_administrator_ids
+    )
+    assert not hasattr(ticket_workflow, "_active_administrator_ids_for_update")

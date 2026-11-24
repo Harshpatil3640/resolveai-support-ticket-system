@@ -60,7 +60,9 @@ CREATE_LINE = re.compile(
 ROLE_CHANGE_LINE = re.compile(
     UTC_TIMESTAMP
     + r" INFO resolveai\.audit: admin_action action=user\.role_change "
-    r"actor_id=\d+ target_user_id=\d+ role_before=agent role_after=customer"
+    r"actor_id=\d+ target_user_id=\d+ role_before=agent role_after=customer "
+    # Phase 7.5: the number of tickets the role change unassigned.
+    r"unassigned_tickets=0"
 )
 
 
@@ -816,3 +818,131 @@ def test_audit_output_of_a_fresh_process(
     ):
         assert secret not in completed.stderr
         assert secret not in stdout_logs
+
+
+# ---------------------------------------------------------------------------
+# Ticket audit records (Phase 7.6)
+# ---------------------------------------------------------------------------
+
+TICKET_LINE = re.compile(UTC_TIMESTAMP + r" INFO resolveai\.audit: ticket_action .*")
+
+
+def test_log_admin_action_is_shared_and_its_format_is_unchanged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.api.routes import admin as admin_routes
+
+    assert admin_routes.log_admin_action is audit_logging.log_admin_action
+
+    _log_sample_action()
+
+    [line] = _audit_lines(capsys.readouterr().err)
+
+    assert CREATE_LINE.fullmatch(line)
+
+
+def test_ticket_records_use_the_default_handler_and_utc_timestamps(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    audit_logging.log_ticket_status_change(
+        actor_id=4, ticket_id=9, status_before="In Progress", status_after="Resolved"
+    )
+
+    [line] = [
+        line for line in capsys.readouterr().err.splitlines() if "ticket_action" in line
+    ]
+
+    assert TICKET_LINE.fullmatch(line)
+    assert line.endswith(
+        "ticket_action action=ticket.status_change actor_id=4 ticket_id=9 "
+        'status_before="In Progress" status_after=Resolved'
+    )
+
+
+def _capture_ticket_record(emit) -> logging.LogRecord:
+    collected = _Collect()
+    logger = get_audit_logger()
+    logger.addHandler(collected)
+
+    try:
+        emit()
+    finally:
+        logger.removeHandler(collected)
+
+    [record] = collected.records
+
+    return record
+
+
+@pytest.mark.parametrize(
+    ("emit", "expected"),
+    [
+        (
+            lambda: audit_logging.log_ticket_assignment(
+                actor_id=1, ticket_id=2, event_type="assigned",
+                previous_assignee_id=None, new_assignee_id=3,
+            ),
+            {"action": "ticket.assign", "actor_id": 1, "ticket_id": 2,
+             "event_type": "assigned", "previous_assignee_id": None, "new_assignee_id": 3},
+        ),
+        (
+            lambda: audit_logging.log_ticket_claim(actor_id=3, ticket_id=2, assignee_id=3),
+            {"action": "ticket.claim", "actor_id": 3, "ticket_id": 2, "assignee_id": 3},
+        ),
+        (
+            lambda: audit_logging.log_ticket_status_change(
+                actor_id=3, ticket_id=2, status_before="Open", status_after="In Progress"
+            ),
+            {"action": "ticket.status_change", "actor_id": 3, "ticket_id": 2,
+             "status_before": "Open", "status_after": "In Progress"},
+        ),
+        (
+            lambda: audit_logging.log_ticket_deletion(actor_id=1, ticket_id=2),
+            {"action": "ticket.delete", "actor_id": 1, "ticket_id": 2},
+        ),
+    ],
+    ids=["assign", "claim", "status", "delete"],
+)
+def test_each_ticket_helper_logs_exactly_its_fields(emit, expected: dict) -> None:
+    record = _capture_ticket_record(emit)
+
+    assert record.ticket_action == expected
+    assert record.levelno == logging.INFO
+    assert not hasattr(record, "admin_action")
+
+
+def test_ticket_helpers_never_echo_unexpected_values() -> None:
+    """Values outside the allowlists are replaced, never written out."""
+
+    hostile = "Ticket title\nforged=entry jane@example.test"
+
+    status = _capture_ticket_record(
+        lambda: audit_logging.log_ticket_status_change(
+            actor_id=1, ticket_id=2, status_before=hostile, status_after="Closed"
+        )
+    )
+    assignment = _capture_ticket_record(
+        lambda: audit_logging.log_ticket_assignment(
+            actor_id="1; DROP", ticket_id=True, event_type=hostile,
+            previous_assignee_id="jane@example.test", new_assignee_id=2.5,
+        )
+    )
+
+    assert status.ticket_action["status_before"] == "unrecognised"
+    assert status.ticket_action["status_after"] == "unrecognised"
+    assert assignment.ticket_action == {
+        "action": "ticket.assign",
+        "actor_id": None,
+        "ticket_id": None,
+        "event_type": "unrecognised",
+        "previous_assignee_id": None,
+        "new_assignee_id": None,
+    }
+
+    for record in (status, assignment):
+        message = record.getMessage()
+
+        assert "\n" not in message
+        assert "forged" not in message
+        assert "example.test" not in message
+        assert "DROP" not in message

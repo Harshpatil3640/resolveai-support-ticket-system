@@ -41,6 +41,11 @@
     gap: 18px;
 }
 
+/* Staff see an extra Assignment filter. */
+.filter-grid.has-assignment-filter {
+    grid-template-columns: 2fr 1fr 1fr 1.2fr 1.2fr;
+}
+
 .filter-field {
     min-width: 0;
 }
@@ -101,8 +106,10 @@
 }
 
 .all-tickets-section .tickets-table {
-    min-width: 850px;
+    min-width: 960px;
 }
+
+/* Assigned column: .assignee-label styles are shared in dashboard.css. */
 
 .all-tickets-section .tickets-table th,
 .all-tickets-section .tickets-table td {
@@ -168,12 +175,168 @@
 
 
 /* =========================================
+   TICKET DETAILS MODAL
+========================================= */
+
+.ticket-detail-description {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.ticket-modal-alert {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+}
+
+.ticket-reload-button {
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.ticket-assignment-panel,
+.ticket-activity {
+    margin-top: 22px;
+    padding-top: 20px;
+    border-top: 1px solid #edf0f5;
+}
+
+.ticket-panel-heading h6 {
+    margin-bottom: 4px;
+    color: #1b2537;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.ticket-panel-heading p {
+    margin-bottom: 12px;
+    color: #8491a5;
+    font-size: 12px;
+}
+
+.assignment-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.assignment-controls .form-select {
+    flex: 1 1 220px;
+    min-height: 40px;
+    border-color: #e2e8f0;
+    border-radius: 8px;
+    font-size: 13px;
+}
+
+.assignment-controls .btn {
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.assignment-status {
+    min-height: 18px;
+    margin: 8px 0 0;
+    font-size: 12px;
+}
+
+.assignment-status:empty {
+    display: none;
+}
+
+
+/* Activity timeline */
+
+.activity-state {
+    margin: 4px 0 0;
+    font-size: 12px;
+}
+
+.activity-timeline {
+    position: relative;
+    margin: 6px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.activity-timeline:empty {
+    display: none;
+}
+
+.activity-item {
+    position: relative;
+    display: flex;
+    gap: 12px;
+    padding-bottom: 14px;
+}
+
+.activity-item:last-child {
+    padding-bottom: 0;
+}
+
+/* Connector line between events */
+.activity-item:not(:last-child)::before {
+    content: "";
+    position: absolute;
+    top: 14px;
+    bottom: 0;
+    left: 5px;
+    width: 2px;
+    background: #e9edf3;
+}
+
+.activity-marker {
+    flex-shrink: 0;
+    width: 12px;
+    height: 12px;
+    margin-top: 3px;
+    border: 2px solid #4779e8;
+    border-radius: 50%;
+    background: #ffffff;
+}
+
+.activity-body {
+    min-width: 0;
+}
+
+.activity-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+}
+
+.activity-type {
+    color: #46536a;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.activity-time {
+    color: #8491a5;
+    font-size: 11px;
+}
+
+.activity-description {
+    margin: 2px 0 0;
+    color: #46536a;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+
+/* =========================================
    RESPONSIVE - TABLET
 ========================================= */
 
 @media (max-width: 1100px) {
 
-    .filter-grid {
+    .filter-grid,
+    .filter-grid.has-assignment-filter {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -190,9 +353,14 @@
         padding: 20px;
     }
 
-    .filter-grid {
+    .filter-grid,
+    .filter-grid.has-assignment-filter {
         grid-template-columns: 1fr;
         gap: 15px;
+    }
+
+    .modal-footer {
+        flex-wrap: wrap;
     }
 
     .filter-actions {

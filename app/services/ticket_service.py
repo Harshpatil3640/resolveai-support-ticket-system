@@ -2,11 +2,12 @@
 from collections.abc import Mapping
 from typing import Any
 
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.errors import roll_back_keeping_primary
 from app.models import Ticket, User
+from app.services.ticket_workflow import EVENT_CREATED, record_ticket_event
 
 
 # Fields that a support agent is allowed to modify.
@@ -51,7 +52,14 @@ def create_ticket(
     priority: str = "Medium",
     status: str = "Open",
 ) -> Ticket:
-    """Create and persist a support ticket."""
+    """Create and persist a support ticket with its ``created`` event.
+
+    The ticket and one ``created`` history event (actor: the creator) are
+    committed in one transaction. On ANY failure (the INSERT, the event or
+    the commit) everything is rolled back and the original failure is
+    re-raised; a failed rollback is attached as a secondary failure
+    (``app.db.errors.rollback_failure_of``).
+    """
 
     ticket = Ticket(
         creator=creator,
@@ -65,8 +73,26 @@ def create_ticket(
         status=status,
     )
 
-    db.add(ticket)
-    _commit_changes(db)
+    try:
+        db.add(ticket)
+        # Assigns the ticket ID the event refers to.
+        db.flush()
+        record_ticket_event(
+            db,
+            ticket_id=ticket.id,
+            actor_id=creator.id,
+            event_type=EVENT_CREATED,
+        )
+        db.commit()
+
+    except Exception as caught:
+        primary = roll_back_keeping_primary(db, caught)
+
+        if primary is caught:
+            raise
+
+        raise primary from None
+
     db.refresh(ticket)
 
     return ticket
@@ -96,6 +122,59 @@ def get_ticket_by_id(
     return db.scalars(statement).first()
 
 
+def _ticket_conditions(
+    *,
+    status: str | None = None,
+    category: str | None = None,
+    priority: str | None = None,
+    search: str | None = None,
+    created_by_user_id: int | None = None,
+    assigned_to_user_id: int | None = None,
+    unassigned: bool = False,
+) -> list[ColumnElement[bool]]:
+    """WHERE conditions shared by ``get_tickets`` and ``count_tickets``.
+
+    One definition keeps the count and the page consistent.
+    """
+
+    if assigned_to_user_id is not None and unassigned:
+        raise ValueError(
+            "assigned_to_user_id and unassigned cannot be combined."
+        )
+
+    conditions: list[ColumnElement[bool]] = []
+
+    if created_by_user_id is not None:
+        conditions.append(Ticket.created_by_user_id == created_by_user_id)
+
+    if assigned_to_user_id is not None:
+        conditions.append(Ticket.assigned_to_user_id == assigned_to_user_id)
+
+    if unassigned:
+        conditions.append(Ticket.assigned_to_user_id.is_(None))
+
+    if status is not None:
+        conditions.append(Ticket.status == status)
+
+    if category is not None:
+        conditions.append(Ticket.category == category)
+
+    if priority is not None:
+        conditions.append(Ticket.priority == priority)
+
+    if search and search.strip():
+        search_term = f"%{search.strip()}%"
+
+        conditions.append(
+            or_(
+                Ticket.title.ilike(search_term),
+                Ticket.description.ilike(search_term),
+            )
+        )
+
+    return conditions
+
+
 def get_tickets(
     db: Session,
     *,
@@ -106,47 +185,75 @@ def get_tickets(
     priority: str | None = None,
     search: str | None = None,
     created_by_user_id: int | None = None,
+    assigned_to_user_id: int | None = None,
+    unassigned: bool = False,
+    load_assignee: bool = False,
 ) -> list[Ticket]:
     """Retrieve tickets with optional filtering and pagination.
 
     ``created_by_user_id`` restricts results to tickets created by that
-    user (used to scope customer access).
+    user (used to scope customer access). ``assigned_to_user_id`` keeps
+    tickets assigned to that user; ``unassigned`` keeps tickets with no
+    assignee (the two cannot be combined). Tickets are ordered newest
+    first (``created_at``, then ``id``, descending). ``load_assignee``
+    loads every assignee with one extra query instead of one per ticket.
     """
 
-    statement = select(Ticket)
-
-    if created_by_user_id is not None:
-        statement = statement.where(
-            Ticket.created_by_user_id == created_by_user_id
-        )
-
-    if status is not None:
-        statement = statement.where(Ticket.status == status)
-
-    if category is not None:
-        statement = statement.where(Ticket.category == category)
-
-    if priority is not None:
-        statement = statement.where(Ticket.priority == priority)
-
-    if search and search.strip():
-        search_term = f"%{search.strip()}%"
-
-        statement = statement.where(
-            or_(
-                Ticket.title.ilike(search_term),
-                Ticket.description.ilike(search_term),
+    statement = (
+        select(Ticket)
+        .where(
+            *_ticket_conditions(
+                status=status,
+                category=category,
+                priority=priority,
+                search=search,
+                created_by_user_id=created_by_user_id,
+                assigned_to_user_id=assigned_to_user_id,
+                unassigned=unassigned,
             )
         )
-
-    statement = (
-        statement
         .order_by(Ticket.created_at.desc(), Ticket.id.desc())
         .offset(skip)
         .limit(limit)
     )
 
+    if load_assignee:
+        statement = statement.options(selectinload(Ticket.assignee))
+
     return list(db.scalars(statement).all())
+
+
+def count_tickets(
+    db: Session,
+    *,
+    status: str | None = None,
+    category: str | None = None,
+    priority: str | None = None,
+    search: str | None = None,
+    created_by_user_id: int | None = None,
+    assigned_to_user_id: int | None = None,
+    unassigned: bool = False,
+) -> int:
+    """Number of tickets matching the same filters as ``get_tickets``.
+
+    Counts before pagination (``skip``/``limit`` do not apply).
+    """
+
+    return db.scalar(
+        select(func.count())
+        .select_from(Ticket)
+        .where(
+            *_ticket_conditions(
+                status=status,
+                category=category,
+                priority=priority,
+                search=search,
+                created_by_user_id=created_by_user_id,
+                assigned_to_user_id=assigned_to_user_id,
+                unassigned=unassigned,
+            )
+        )
+    )
 
 
 def update_ticket(
@@ -154,7 +261,12 @@ def update_ticket(
     ticket: Ticket,
     updates: Mapping[str, Any],
 ) -> Ticket:
-    """Update permitted ticket fields."""
+    """Update permitted ticket fields (no permission or workflow checks).
+
+    A low-level helper for trusted callers. The HTTP API edits tickets
+    through ``app.services.ticket_workflow.edit_ticket``, which enforces
+    management permission, status transitions and the version check.
+    """
 
     invalid_fields = set(updates) - ALLOWED_UPDATE_FIELDS
 

@@ -56,7 +56,12 @@
                     <span>Tickets</span>
                 </a>
 
-                <a href="/analytics.html" class="nav-item active">
+                <!-- Staff only: revealed once the role is confirmed. -->
+                <a
+                    href="/analytics.html"
+                    class="nav-item active d-none"
+                    data-visible-roles="admin agent"
+                >
                     <span>Analytics</span>
                 </a>
 
@@ -154,8 +159,9 @@
 
                 <!-- Operational summary -->
                 <section
-                    class="stats-grid analytics-summary-grid"
+                    class="stats-grid analytics-summary-grid d-none"
                     aria-label="Ticket statistics"
+                    data-visible-roles="admin agent"
                 >
 
                     <article class="stat-card">
@@ -232,8 +238,11 @@
                 </section>
 
 
-                <!-- Ticket operations analytics -->
-                <section class="analytics-section">
+                <!-- Ticket operations analytics (staff only) -->
+                <section
+                    class="analytics-section d-none"
+                    data-visible-roles="admin agent"
+                >
 
                     <div class="section-heading">
                         <div>
@@ -347,8 +356,9 @@
 
                 <!-- Machine learning model performance -->
                 <section
-                    class="analytics-section"
+                    class="analytics-section d-none"
                     id="model-performance"
+                    data-visible-roles="admin agent"
                 >
 
                     <div class="section-heading">
@@ -575,6 +585,9 @@
         crossorigin="anonymous"
     ></script>
 
+
+    <!-- Shared utilities (must load before page scripts) -->
+    <script src="./js/common.js" defer></script>
 
     <!-- Analytics JavaScript -->
     <script src="./js/analytics.js" defer></script>

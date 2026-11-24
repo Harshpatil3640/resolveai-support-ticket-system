@@ -27,7 +27,7 @@ from app.scripts import create_agent as create_agent_module
 from app.services import user_service
 
 
-HEAD_REVISION = "0002"
+HEAD_REVISION = "0003"
 
 AGENT_PASSWORD = "StrongPassword123!"
 
@@ -388,7 +388,7 @@ def test_refuses_foreign_database_at_head_revision_before_any_prompt(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-ResolveAI database that merely records '0002' is refused."""
+    """A non-ResolveAI database that merely records the head revision is refused."""
 
     with closing(sqlite3.connect(database_file)) as connection:
         connection.execute("CREATE TABLE invoices (id INTEGER PRIMARY KEY)")
