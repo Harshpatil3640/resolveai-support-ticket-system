@@ -25,6 +25,10 @@ migrate on startup, and scripts such as `app.scripts.create_agent` only
 |----------|---------|
 | `0001` | **Baseline.** The schema exactly as it existed before Alembic (`users`, `tickets`, `revoked_tokens` with their indexes and constraints). |
 | `0002` | Adds `users.token_version` (`INTEGER NOT NULL DEFAULT 0`). Existing users receive `0`. |
+| `0003` | **Ticket assignment and history.** Adds `tickets.assigned_to_user_id` (nullable, foreign key to `users.id`, indexed), `tickets.assigned_at` (nullable) and `tickets.version` (`INTEGER NOT NULL DEFAULT 1`, the optimistic-concurrency counter), and creates the `ticket_events` history table. Existing tickets keep every value, start unassigned at version `1` and receive no history. See [section 8](#8-upgrading-an-existing-database-to-0003). |
+
+`alembic heads` reports `0003`. A database is only at `0003` once
+`alembic upgrade head` has been run against it; check with `alembic current`.
 
 ## 1. Install dependencies
 
@@ -111,8 +115,10 @@ exactly. (Equivalent manual command after a successful check:
 alembic upgrade head
 ```
 
-For the current history this runs `0002`, adding `users.token_version` with
-value `0` for every existing user. No other data is changed.
+For the current history this runs `0002` (adding `users.token_version` with
+value `0` for every existing user) and then `0003` (ticket assignment,
+versioning and history; see [section 8](#8-upgrading-an-existing-database-to-0003)).
+No existing value is changed.
 
 ### Rehearsing on a copy (optional)
 
@@ -234,13 +240,195 @@ matches the database. Reset the records with
 `alembic stamp --purge <revision>` only after confirming the schema matches
 that revision (see "Inconsistent records or schema mismatch").
 
+## 8. Upgrading an existing database to 0003
+
+Revision `0003` adds ticket assignment, ticket versioning and the
+`ticket_events` history table. Application code from Phase 7 onward
+requires it: the API, the provisioning scripts and the frontend's
+assignment, claim and history features all expect the `0003` schema, and
+the scripts refuse to run against a database that is not at head
+(section 7).
+
+> **Status of the local database.** The repository's local `resolveai.db`
+> has **not** been upgraded: it is still at `0002`. Upgrading it is a
+> separate, deliberate operation that follows the procedure below.
+
+### What the upgrade changes
+
+| Object | Change |
+|---|---|
+| `tickets.assigned_to_user_id` | New, nullable. Foreign key `fk_tickets_assigned_to_user_id_users` to `users.id`; index `ix_tickets_assigned_to_user_id`. |
+| `tickets.assigned_at` | New, nullable timestamp of the current assignment. |
+| `tickets.version` | New, `NOT NULL`, server default `1`. |
+| `ticket_events` | New table: `id`, `ticket_id`, `event_type`, `actor_user_id`, `from_assignee_id`, `to_assignee_id`, `from_status`, `to_status`, `reason`, `created_at`. CHECK constraints allow only the known event types, statuses and unassignment reasons. `ticket_id` references `tickets.id` with `ON DELETE CASCADE`; the three user columns reference `users.id`. Index `ix_ticket_events_ticket_id_created_at_id`. |
+| `users`, `revoked_tokens` | Not changed. |
+
+### Existing ticket preservation
+
+- Every existing column value of every ticket is kept unchanged, including
+  `id`, `created_by_user_id`, both timestamps, the AI prediction and the
+  final category.
+- Every existing ticket starts **unassigned** (`assigned_to_user_id` and
+  `assigned_at` are `NULL`) at `version` `1`.
+- **No history is generated** for existing tickets: their history starts
+  with the first change made after the upgrade. The history endpoint
+  returns an empty list for them, and the frontend shows "No activity
+  history available yet."
+- Statuses are kept exactly. A ticket that was "In Progress" before the
+  upgrade stays "In Progress" with no assignee (a *legacy* state the
+  workflow cannot create). An agent can claim it, or an administrator can
+  assign it; both are permitted for unassigned Open and In Progress
+  tickets.
+
+### SQLite table rebuild strategy
+
+SQLite cannot add a foreign key with `ALTER TABLE`, so `tickets` is rebuilt
+in Alembic batch mode: a new table is created, every row is copied, the old
+table is dropped and the new one renamed. To make the rebuild exact:
+
+- The new table is built from an **explicit definition** of `tickets`
+  (`copy_from`), not from reflection, so every column, both CHECK
+  constraints (`ck_tickets_priority`, `ck_tickets_status`), the
+  `created_by_user_id` foreign key and its index are recreated exactly.
+- **Before** rebuilding, the live `tickets` columns are compared with that
+  definition. If they differ (a missing column, or an extra column that the
+  copy would silently drop), the migration stops with
+  `Migration 0003 stopped: the tickets table does not have the expected
+  columns ...` and **nothing is changed**. Investigate the schema
+  (section 7, "Inconsistent records or schema mismatch") before retrying.
+- The whole migration runs in **one transaction** (the migration engine
+  makes SQLite's DDL transactional). If any step fails, everything is
+  rolled back and the database remains at `0002`.
+- Offline SQL (`--sql`) cannot perform the column check. Never apply
+  generated `0003` SQL to a database; run the migration online.
+
+### Foreign key requirements
+
+- The application enables SQLite foreign-key enforcement on every
+  connection (`PRAGMA foreign_keys=ON`). Migrations deliberately run with
+  SQLite's default (enforcement **off**), so the table rebuild cannot
+  trigger foreign-key actions. The migration is also ordered to be valid
+  with enforcement on: `tickets` is rebuilt **before** `ticket_events`,
+  which references it, exists; on downgrade `ticket_events` is dropped
+  **before** `tickets` is rebuilt. The test suite runs `0003` both ways.
+- Existing data must already satisfy the foreign keys: every
+  `tickets.created_by_user_id` must reference an existing user. Check
+  before upgrading (step 2 below); `PRAGMA foreign_key_check` must return
+  no rows.
+- `ticket_events.ticket_id` cascades: deleting a ticket deletes its
+  history. The event user columns do not cascade; users are deactivated,
+  never deleted, so history keeps valid references.
+
+### Procedure
+
+Run from the project root with the virtual environment activated.
+
+**1. Stop the application.** No API process or script may use the database
+while it is copied or migrated.
+
+**2. Check the current state (read-only).**
+
+```cmd
+alembic current
+python -c "import sqlite3; c = sqlite3.connect('file:resolveai.db?mode=ro', uri=True); print('integrity:', c.execute('PRAGMA integrity_check').fetchone()[0]); print('foreign key problems:', c.execute('PRAGMA foreign_key_check').fetchall()); print('users:', c.execute('SELECT COUNT(*) FROM users').fetchone()[0], 'tickets:', c.execute('SELECT COUNT(*) FROM tickets').fetchone()[0])"
+```
+
+Expected: `0002`, `integrity: ok`, `foreign key problems: []`. Note the user
+and ticket counts. Do not continue on any other result.
+
+**3. Back up the database.** Keep the copy until the upgraded application
+has been verified in use. Use a new name, and never overwrite an earlier
+backup:
+
+```cmd
+copy resolveai.db resolveai.db.pre-0003-YYYYMMDD.bak
+certutil -hashfile resolveai.db SHA256
+certutil -hashfile resolveai.db.pre-0003-YYYYMMDD.bak SHA256
+```
+
+The two hashes must be identical.
+
+**4. Rehearse on a copy** (recommended). Every Alembic command can target
+another file with `-x db_url=...`:
+
+```cmd
+copy resolveai.db rehearsal-0003.db
+alembic -x db_url=sqlite:///rehearsal-0003.db upgrade head
+alembic -x db_url=sqlite:///rehearsal-0003.db current
+alembic -x db_url=sqlite:///rehearsal-0003.db check
+alembic -x db_url=sqlite:///rehearsal-0003.db downgrade -1
+alembic -x db_url=sqlite:///rehearsal-0003.db upgrade head
+del rehearsal-0003.db
+```
+
+Each command must succeed; `current` reports `0003 (head)` and `check`
+reports `No new upgrade operations detected.`
+
+**5. Upgrade.**
+
+```cmd
+alembic upgrade head
+```
+
+The output ends with `Running upgrade 0002 -> 0003, Add ticket assignment
+columns and the ticket_events history table.`
+
+**6. Verify.**
+
+```cmd
+alembic current
+alembic check
+python -c "import sqlite3; c = sqlite3.connect('file:resolveai.db?mode=ro', uri=True); print('integrity:', c.execute('PRAGMA integrity_check').fetchone()[0]); print('foreign key problems:', c.execute('PRAGMA foreign_key_check').fetchall()); print('users:', c.execute('SELECT COUNT(*) FROM users').fetchone()[0], 'tickets:', c.execute('SELECT COUNT(*) FROM tickets').fetchone()[0], 'events:', c.execute('SELECT COUNT(*) FROM ticket_events').fetchone()[0])"
+```
+
+Expected: `0003 (head)`; `No new upgrade operations detected.`;
+`integrity: ok`; `foreign key problems: []`; the same user and ticket counts
+as in step 2; `events: 0`. Then start the application, sign in, and open the
+tickets page: existing tickets appear as unassigned.
+
+**7. If there is no administrator yet**, create one
+(`python -m app.scripts.create_admin`, see the README). Without an active
+administrator, tickets can be claimed by agents but not assigned.
+
+### Recovery precautions
+
+- **A failed upgrade changes nothing.** The migration is transactional: the
+  database remains at `0002` and the error is reported with fixed text
+  (no SQL or data). Fix the cause and re-run.
+- **To abandon an upgrade that succeeded**, prefer restoring the backup
+  over downgrading: stop the application, then
+  `copy resolveai.db.pre-0003-YYYYMMDD.bak resolveai.db` and check the hash
+  and `alembic current` (`0002`). Restoring loses every change made after
+  the backup, so decide before the system is in use.
+- **Downgrading** (`alembic downgrade -1`, see below) keeps tickets but
+  permanently discards assignments and history. Back up first.
+- Never edit `alembic_version` by hand to "skip" `0003`; the provisioning
+  check compares the real schema with the recorded revision and refuses a
+  mismatch.
+
 ## Downgrading
 
 ```cmd
 alembic downgrade -1
 ```
 
-Back up the database before downgrading. Notes for `0002`:
+Back up the database before downgrading.
+
+Notes for `0003`:
+
+- Every ticket keeps its rows and its `0002` columns (including any status,
+  priority, category or text changes made after the upgrade), and the
+  `tickets` table returns to exactly the `0002` schema.
+- **Permanently discarded:** every assignment (`assigned_to_user_id`,
+  `assigned_at`), every `version` value, and the whole `ticket_events`
+  history. Upgrading again starts every ticket unassigned at version `1`
+  with no history.
+- The migration refuses to downgrade, changing nothing, if `tickets` does
+  not have exactly the `0003` columns.
+- Application code from Phase 7 onward requires `0003`; do not run it
+  against a downgraded database.
+
+Notes for `0002`:
 
 - Downgrading removes `users.token_version` and the stored values. The
   application code at `head` requires this column, so do not run the API

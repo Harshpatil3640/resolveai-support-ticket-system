@@ -68,7 +68,15 @@ class User(Base):
         nullable=False,
     )
 
-    # One user can create multiple tickets
+    # One user can create multiple tickets. tickets has two foreign keys
+    # to users, so each relationship names the column it uses.
     tickets: Mapped[list[Ticket]] = relationship(
         back_populates="creator",
+        foreign_keys="Ticket.created_by_user_id",
+    )
+
+    # Tickets currently assigned to this user.
+    assigned_tickets: Mapped[list[Ticket]] = relationship(
+        back_populates="assignee",
+        foreign_keys="Ticket.assigned_to_user_id",
     )

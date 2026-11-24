@@ -6,6 +6,7 @@ application database (resolveai.db) is never touched.
 
 import functools
 import hashlib
+import importlib.util
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -17,8 +18,9 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
@@ -49,9 +51,11 @@ from app.db.migrations import (
     read_database_revisions,
     sqlite_url,
 )
+from app.db.schema_inspection import compare_schemas, describe_schema
 
 
-HEAD_REVISION = "0002"
+HEAD_REVISION = "0003"
+TOKEN_VERSION_REVISION = "0002"
 
 
 @pytest.fixture(autouse=True)
@@ -242,7 +246,14 @@ def test_revision_history_is_linear_baseline_to_head() -> None:
 
     assert script.get_bases() == [BASELINE_REVISION]
     assert script.get_heads() == [HEAD_REVISION]
-    assert script.get_revision(HEAD_REVISION).down_revision == BASELINE_REVISION
+    assert (
+        script.get_revision(HEAD_REVISION).down_revision
+        == TOKEN_VERSION_REVISION
+    )
+    assert (
+        script.get_revision(TOKEN_VERSION_REVISION).down_revision
+        == BASELINE_REVISION
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +271,7 @@ def test_upgrade_head_initialises_empty_database(
         "alembic_version",
         "users",
         "tickets",
+        "ticket_events",
         "revoked_tokens",
     }
     assert _current_revision(database_file) == [HEAD_REVISION]
@@ -270,6 +282,14 @@ def test_migrated_schema_matches_sqlalchemy_models(
     alembic_config: Config,
 ) -> None:
     """Models and migrations must never drift apart."""
+
+    # Every model table is compared, including the ticket history.
+    assert set(Base.metadata.tables) == {
+        "users",
+        "tickets",
+        "ticket_events",
+        "revoked_tokens",
+    }
 
     command.upgrade(alembic_config, "head")
 
@@ -388,7 +408,10 @@ def test_existing_database_stamp_and_upgrade_preserves_data(
     assert _rows(legacy_database, "users") == [
         row + (0,) for row in users_before
     ]
-    assert _rows(legacy_database, "tickets") == tickets_before
+    # Every existing ticket is unchanged: unassigned, at version 1.
+    assert _rows(legacy_database, "tickets") == [
+        row + (None, None, 1) for row in tickets_before
+    ]
     assert _rows(legacy_database, "revoked_tokens") == revoked_before
 
     with _connect(legacy_database) as connection:
@@ -542,7 +565,12 @@ def test_offline_sql_generation_does_not_touch_any_database(
 
     command.upgrade(alembic_config, "head", sql=True)
 
-    assert "CREATE TABLE users" in capsys.readouterr().out
+    output = capsys.readouterr().out
+
+    assert "CREATE TABLE users" in output
+    # 0003 rebuilds tickets from an explicit definition, which needs no
+    # connection, and creates the history table.
+    assert "CREATE TABLE ticket_events" in output
     assert not database_file.exists()
 
 
@@ -760,7 +788,7 @@ def _users_without_token_version(path: Path) -> None:
 
 
 def _baseline_stamped_as_head(path: Path) -> None:
-    # The revision says head, but migration 0002 was never actually applied.
+    # The revision says head, but the later migrations were never applied.
     _pending(path)
     _run_sql(
         path,
@@ -784,7 +812,7 @@ def _missing_index(path: Path) -> None:
         pytest.param(
             _pending,
             PendingMigrationsError,
-            "is at revision 0001, but this code requires revision 0002",
+            f"is at revision 0001, but this code requires revision {HEAD_REVISION}",
             True,
             id="pending-earlier-revision",
         ),
@@ -820,7 +848,7 @@ def _missing_index(path: Path) -> None:
         pytest.param(
             _two_known_revisions,
             InvalidRevisionSetError,
-            "records several revisions (0001, 0002)",
+            f"records several revisions (0001, {HEAD_REVISION})",
             False,
             id="two-known-revisions-linear-history",
         ),
@@ -829,7 +857,7 @@ def _missing_index(path: Path) -> None:
             SchemaMismatchError,
             "1 unexpected table (names not shown)",
             False,
-            id="unrelated-database-at-0002",
+            id="unrelated-database-at-head",
         ),
         pytest.param(
             _missing_application_tables,
@@ -996,7 +1024,7 @@ def test_reference_schema_is_built_from_migrations_in_a_temporary_database(
     reference = build_reference_schema("heads")
 
     assert not sentinel.exists()
-    assert set(reference) == {"users", "tickets", "revoked_tokens"}
+    assert set(reference) == {"users", "tickets", "ticket_events", "revoked_tokens"}
     assert reference["users"]["columns"]["token_version"] == (
         "INTEGER",
         False,
@@ -1124,11 +1152,13 @@ def test_known_revisions_are_shown_from_the_code_not_the_database(
         ensure_database_at_head(database_file)
 
     # Both values equal this code's revision IDs, so they may be shown.
-    assert "records several revisions (0001, 0002)" in str(error_info.value)
+    assert f"records several revisions (0001, {HEAD_REVISION})" in str(
+        error_info.value
+    )
 
 
 def _hostile_schema(path: Path) -> None:
-    """A database at '0002' whose schema text carries secrets and SQL."""
+    """A database at the head revision whose schema text carries secrets and SQL."""
 
     schema_sql = [
         statement.replace(
@@ -1267,7 +1297,7 @@ def test_check_baseline_summarises_hostile_schema_safely(
         pytest.param(
             [HEAD_REVISION, HOSTILE_REVISION],
             True,
-            "(recorded revision: 0002; 1 unrecognised revision value "
+            f"(recorded revision: {HEAD_REVISION}; 1 unrecognised revision value "
             "(not shown))",
             id="head-plus-hostile",
         ),
@@ -1419,3 +1449,457 @@ def test_baseline_refusal_never_names_existing_tables(
 
     assert _table_names(database_file) == tables_before
     assert _sha256(database_file) == before
+
+
+# ---------------------------------------------------------------------------
+# Revision 0003: ticket assignment columns and ticket_events
+# ---------------------------------------------------------------------------
+
+MIGRATION_0003 = (
+    Path(__file__).resolve().parents[1]
+    / "alembic"
+    / "versions"
+    / "0003_ticket_assignment_and_events.py"
+)
+
+# Data inserted at revision 0002. Ticket 2 is "In Progress" with nobody
+# assigned (assignment does not exist yet); 0003 must leave it as it is.
+DATA_0002_SQL = [
+    "INSERT INTO users (id, name, email, password_hash, role, is_active, "
+    "created_at, token_version) VALUES (1, 'Agent One', 'agent1@example.test', "
+    "'hash-1', 'agent', 1, '2026-11-01 09:00:00.000000', 0)",
+    "INSERT INTO users (id, name, email, password_hash, role, is_active, "
+    "created_at, token_version) VALUES (2, 'Old Admin', 'admin@example.test', "
+    "'hash-2', 'admin', 0, '2026-11-02 09:00:00.000000', 3)",
+    "INSERT INTO users (id, name, email, password_hash, role, is_active, "
+    "created_at, token_version) VALUES (3, 'Customer', 'customer@example.test', "
+    "'hash-3', 'customer', 1, '2026-11-02 10:00:00.000000', 1)",
+    "INSERT INTO tickets (id, title, description, requester_name, "
+    "predicted_category, category, prediction_confidence, priority, status, "
+    "created_by_user_id, created_at, updated_at) VALUES (1, 'Payment failed', "
+    "'Card declined.', 'Jane', 'PAYMENT', 'PAYMENT', 0.97, 'High', 'Open', 1, "
+    "'2026-11-03 10:00:00.000000', '2026-11-03 10:00:00.000000')",
+    "INSERT INTO tickets (id, title, description, requester_name, "
+    "predicted_category, category, prediction_confidence, priority, status, "
+    "created_by_user_id, created_at, updated_at) VALUES (2, 'Refund pending', "
+    "'Refund not received.', NULL, 'REFUND', NULL, 0.61, 'Medium', "
+    "'In Progress', 3, '2026-11-04 10:00:00.000000', "
+    "'2026-11-05 11:00:00.000000')",
+    "INSERT INTO tickets (id, title, description, requester_name, "
+    "predicted_category, category, prediction_confidence, priority, status, "
+    "created_by_user_id, created_at, updated_at) VALUES (3, 'Late order', "
+    "'Order is late.', NULL, NULL, NULL, NULL, 'Low', 'Resolved', 2, "
+    "'2026-11-06 10:00:00.000000', '2026-11-07 10:00:00.000000')",
+    "INSERT INTO revoked_tokens (jti, expires_at, revoked_at) VALUES "
+    "('jti-0002', '2026-11-06 10:00:00.000000', '2026-11-06 09:30:00.000000')",
+]
+
+TICKET_EVENT_COLUMNS = (
+    "ticket_id, event_type, actor_user_id, from_assignee_id, to_assignee_id, "
+    "from_status, to_status, reason, created_at"
+)
+
+
+@pytest.fixture
+def database_0002(tmp_path: Path) -> Path:
+    """A genuine revision-0002 database (built by the migrations) with data."""
+
+    path = tmp_path / "at_0002.db"
+    command.upgrade(_config_for(path), TOKEN_VERSION_REVISION)
+    _run_sql(path, *DATA_0002_SQL)
+
+    assert _current_revision(path) == [TOKEN_VERSION_REVISION]
+
+    return path
+
+
+def _enforcing_connection(path: Path) -> closing[sqlite3.Connection]:
+    """A connection with foreign keys enforced, as the application uses."""
+
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+
+    return closing(connection)
+
+
+def _table_sql(path: Path, table: str) -> str:
+    with _connect(path) as connection:
+        return connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()[0]
+
+
+def _foreign_key_list(path: Path, table: str) -> set[tuple]:
+    """(column, referred table, referred column, ON DELETE) per foreign key."""
+
+    with _connect(path) as connection:
+        return {
+            (row[3], row[2], row[4], row[6])
+            for row in connection.execute(f"PRAGMA foreign_key_list({table})")
+        }
+
+
+def _index_names(path: Path, table: str) -> set[str]:
+    with _connect(path) as connection:
+        return {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = ? AND name NOT LIKE 'sqlite_%'",
+                (table,),
+            )
+        }
+
+
+def _describe(path: Path) -> dict:
+    engine = create_engine(sqlite_url(path))
+
+    try:
+        return describe_schema(engine)
+    finally:
+        engine.dispose()
+
+
+def _check_constraint_names(path: Path, table: str) -> set[str]:
+    engine = create_engine(sqlite_url(path))
+
+    try:
+        return {
+            constraint["name"]
+            for constraint in inspect(engine).get_check_constraints(table)
+        }
+    finally:
+        engine.dispose()
+
+
+def _insert_event(connection: sqlite3.Connection, **overrides) -> None:
+    values = {
+        "ticket_id": 1,
+        "event_type": "created",
+        "actor_user_id": 1,
+        "from_assignee_id": None,
+        "to_assignee_id": None,
+        "from_status": None,
+        "to_status": None,
+        "reason": None,
+        "created_at": "2026-11-23 10:00:00.000000",
+        **overrides,
+    }
+    connection.execute(
+        f"INSERT INTO ticket_events ({TICKET_EVENT_COLUMNS}) VALUES "
+        "(:ticket_id, :event_type, :actor_user_id, :from_assignee_id, "
+        ":to_assignee_id, :from_status, :to_status, :reason, :created_at)",
+        values,
+    )
+
+
+def test_0003_upgrade_preserves_existing_rows(database_0002: Path) -> None:
+    users_before = _rows(database_0002, "users")
+    tickets_before = _rows(database_0002, "tickets")
+    revoked_before = _rows(database_0002, "revoked_tokens")
+
+    command.upgrade(_config_for(database_0002), "head")
+
+    assert _current_revision(database_0002) == [HEAD_REVISION]
+    assert _rows(database_0002, "users") == users_before
+    assert _rows(database_0002, "revoked_tokens") == revoked_before
+    # Every ticket keeps every value; the new columns are NULL, NULL, 1.
+    assert _rows(database_0002, "tickets") == [
+        row + (None, None, 1) for row in tickets_before
+    ]
+    # No history is generated for existing tickets.
+    assert _rows(database_0002, "ticket_events") == []
+
+    with _connect(database_0002) as connection:
+        in_progress = connection.execute(
+            "SELECT status, assigned_to_user_id, assigned_at, version "
+            "FROM tickets WHERE id = 2"
+        ).fetchone()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+    # The unassigned "In Progress" ticket is not assigned or moved to Open.
+    assert in_progress == ("In Progress", None, None, 1)
+
+
+def test_0003_schema_has_assignee_foreign_key_indexes_and_history_table(
+    database_0002: Path,
+) -> None:
+    command.upgrade(_config_for(database_0002), "head")
+
+    # SQLite itself records the assignee foreign key (not only the model).
+    assert _foreign_key_list(database_0002, "tickets") == {
+        ("created_by_user_id", "users", "id", "NO ACTION"),
+        ("assigned_to_user_id", "users", "id", "NO ACTION"),
+    }
+    assert (
+        "CONSTRAINT fk_tickets_assigned_to_user_id_users FOREIGN KEY"
+        "(assigned_to_user_id) REFERENCES users (id)"
+        in _table_sql(database_0002, "tickets")
+    )
+    assert _index_names(database_0002, "tickets") == {
+        "ix_tickets_created_by_user_id",
+        "ix_tickets_assigned_to_user_id",
+    }
+    assert _check_constraint_names(database_0002, "tickets") == {
+        "ck_tickets_priority",
+        "ck_tickets_status",
+    }
+
+    columns = _describe(database_0002)["tickets"]["columns"]
+
+    assert columns["assigned_to_user_id"] == ("INTEGER", True, None)
+    assert columns["assigned_at"] == ("DATETIME", True, None)
+    assert columns["version"] == ("INTEGER", False, "1")
+
+    assert _foreign_key_list(database_0002, "ticket_events") == {
+        ("ticket_id", "tickets", "id", "CASCADE"),
+        ("actor_user_id", "users", "id", "NO ACTION"),
+        ("from_assignee_id", "users", "id", "NO ACTION"),
+        ("to_assignee_id", "users", "id", "NO ACTION"),
+    }
+    events_sql = _table_sql(database_0002, "ticket_events")
+
+    for name in (
+        "fk_ticket_events_ticket_id_tickets",
+        "fk_ticket_events_actor_user_id_users",
+        "fk_ticket_events_from_assignee_id_users",
+        "fk_ticket_events_to_assignee_id_users",
+    ):
+        assert f"CONSTRAINT {name} FOREIGN KEY" in events_sql
+
+    assert _index_names(database_0002, "ticket_events") == {
+        "ix_ticket_events_ticket_id_created_at_id",
+    }
+    assert _check_constraint_names(database_0002, "ticket_events") == {
+        "ck_ticket_events_event_type",
+        "ck_ticket_events_from_status",
+        "ck_ticket_events_to_status",
+        "ck_ticket_events_reason",
+    }
+
+    with _connect(database_0002) as connection:
+        index_columns = [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info(ix_ticket_events_ticket_id_created_at_id)"
+            )
+        ]
+
+    assert index_columns == ["ticket_id", "created_at", "id"]
+
+    # Upgrading an existing database gives exactly the schema a new one gets.
+    assert compare_schemas(
+        build_reference_schema("head"), _describe(database_0002)
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE tickets SET priority = 'Urgent' WHERE id = 1",
+        "UPDATE tickets SET status = 'Closed' WHERE id = 1",
+        "UPDATE tickets SET assigned_to_user_id = 99 WHERE id = 1",
+        "UPDATE tickets SET version = NULL WHERE id = 1",
+    ],
+    ids=["invalid priority", "invalid status", "missing assignee", "null version"],
+)
+def test_0003_ticket_constraints_are_enforced(
+    database_0002: Path,
+    statement: str,
+) -> None:
+    command.upgrade(_config_for(database_0002), "head")
+    tickets_before = _rows(database_0002, "tickets")
+
+    with _enforcing_connection(database_0002) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(statement)
+
+    assert _rows(database_0002, "tickets") == tickets_before
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"event_type": "deleted"},
+        {"event_type": None},
+        {"from_status": "Closed"},
+        {"to_status": "open"},
+        {"reason": "something_else"},
+        {"ticket_id": 99},
+        {"actor_user_id": 99},
+        {"actor_user_id": None},
+        {"from_assignee_id": 99},
+        {"to_assignee_id": 99},
+        {"created_at": None},
+    ],
+    ids=lambda overrides: "-".join(f"{k}={v}" for k, v in overrides.items()),
+)
+def test_0003_ticket_event_constraints_are_enforced(
+    database_0002: Path,
+    overrides: dict,
+) -> None:
+    command.upgrade(_config_for(database_0002), "head")
+
+    with _enforcing_connection(database_0002) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_event(connection, **overrides)
+
+    assert _rows(database_0002, "ticket_events") == []
+
+
+def test_0003_valid_events_are_accepted_and_cascade_with_their_ticket(
+    database_0002: Path,
+) -> None:
+    command.upgrade(_config_for(database_0002), "head")
+
+    with _enforcing_connection(database_0002) as connection:
+        _insert_event(connection)
+        _insert_event(connection, event_type="assigned", to_assignee_id=1)
+        _insert_event(
+            connection,
+            event_type="status_changed",
+            from_status="Open",
+            to_status="In Progress",
+        )
+        _insert_event(
+            connection,
+            event_type="unassigned",
+            from_assignee_id=1,
+            reason="assignee_deactivated",
+        )
+        _insert_event(connection, ticket_id=2, actor_user_id=3)
+        connection.commit()
+
+        # Deleting a ticket deletes its events, and only its events.
+        connection.execute("DELETE FROM tickets WHERE id = 1")
+        connection.commit()
+
+        remaining = connection.execute(
+            "SELECT ticket_id FROM ticket_events"
+        ).fetchall()
+
+    assert remaining == [(2,)]
+
+
+def test_0003_downgrade_restores_0002_schema_and_data(database_0002: Path) -> None:
+    users_before = _rows(database_0002, "users")
+    tickets_before = _rows(database_0002, "tickets")
+    config = _config_for(database_0002)
+    reference_0002 = build_reference_schema(TOKEN_VERSION_REVISION)
+
+    command.upgrade(config, "head")
+
+    # Use the new schema before downgrading: an assignment and history.
+    with _enforcing_connection(database_0002) as connection:
+        connection.execute(
+            "UPDATE tickets SET assigned_to_user_id = 1, "
+            "assigned_at = '2026-11-23 10:00:00.000000', version = 2 "
+            "WHERE id = 1"
+        )
+        _insert_event(connection, event_type="assigned", to_assignee_id=1)
+        connection.commit()
+
+    command.downgrade(config, TOKEN_VERSION_REVISION)
+
+    assert _current_revision(database_0002) == [TOKEN_VERSION_REVISION]
+    assert "ticket_events" not in _table_names(database_0002)
+    assert _rows(database_0002, "users") == users_before
+    assert _rows(database_0002, "tickets") == tickets_before
+    # Columns, foreign keys, indexes and CHECK constraints are exactly 0002.
+    assert compare_schemas(reference_0002, _describe(database_0002)) == []
+    assert _foreign_key_list(database_0002, "tickets") == {
+        ("created_by_user_id", "users", "id", "NO ACTION"),
+    }
+    assert _index_names(database_0002, "tickets") == {
+        "ix_tickets_created_by_user_id",
+    }
+    assert "fk_tickets_assigned_to_user_id_users" not in _table_sql(
+        database_0002, "tickets"
+    )
+
+    with _enforcing_connection(database_0002) as connection:
+        for statement in (
+            "UPDATE tickets SET status = 'Closed' WHERE id = 1",
+            "UPDATE tickets SET priority = 'Urgent' WHERE id = 1",
+            "UPDATE tickets SET created_by_user_id = 99 WHERE id = 1",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(statement)
+
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    assert _rows(database_0002, "tickets") == tickets_before
+
+
+def test_0003_refuses_unexpected_ticket_columns_and_changes_nothing(
+    database_0002: Path,
+) -> None:
+    """The rebuild copies known columns only, so it must not drop others."""
+
+    _run_sql(
+        database_0002,
+        "ALTER TABLE tickets ADD COLUMN secret_notes_column TEXT",
+        "UPDATE tickets SET secret_notes_column = 'keep me' WHERE id = 1",
+    )
+    before = _sha256(database_0002)
+
+    with pytest.raises(RuntimeError) as error:
+        command.upgrade(_config_for(database_0002), "head")
+
+    message = str(error.value)
+
+    assert "0 missing, 1 unexpected; names not shown" in message
+    assert "Nothing was changed" in message
+    assert "secret_notes_column" not in message
+    assert _sha256(database_0002) == before
+    assert _current_revision(database_0002) == [TOKEN_VERSION_REVISION]
+    assert "ticket_events" not in _table_names(database_0002)
+
+
+def test_0003_runs_with_foreign_keys_enforced(database_0002: Path) -> None:
+    """alembic/env.py turns enforcement off; the migration must not need that.
+
+    The migration's own upgrade and downgrade are run on a connection that
+    enforces foreign keys: tickets is rebuilt before ticket_events exists,
+    and ticket_events is dropped before tickets is rebuilt again.
+    """
+
+    spec = importlib.util.spec_from_file_location("migration_0003", MIGRATION_0003)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    tickets_before = _rows(database_0002, "tickets")
+    engine = create_engine(sqlite_url(database_0002))
+
+    @event.listens_for(engine, "connect")
+    def _enforce(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        with engine.begin() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.upgrade()
+
+        with _enforcing_connection(database_0002) as connection:
+            _insert_event(connection)
+            connection.commit()
+
+        assert _rows(database_0002, "tickets") == [
+            row + (None, None, 1) for row in tickets_before
+        ]
+
+        with engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.downgrade()
+    finally:
+        engine.dispose()
+
+    assert _rows(database_0002, "tickets") == tickets_before
+    assert "ticket_events" not in _table_names(database_0002)
+
+    with _connect(database_0002) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

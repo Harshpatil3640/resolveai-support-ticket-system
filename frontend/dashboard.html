@@ -51,7 +51,12 @@
                     <span>Tickets</span>
                 </a>
 
-                <a href="/analytics.html" class="nav-item">
+                <!-- Staff only: revealed once the role is confirmed. -->
+                <a
+                    href="/analytics.html"
+                    class="nav-item d-none"
+                    data-visible-roles="admin agent"
+                >
                     <span>Analytics</span>
                 </a>
 
@@ -128,16 +133,35 @@
 
                         <h2>Welcome back, <span id="welcomeName">Agent</span>!</h2>
 
+                        <!-- Single <p> keeps the :last-child spacing rule;
+                             the role-specific copy is toggled inside it. -->
                         <p>
-                            Here's an overview of your support operations.
+                            <span class="d-none" data-visible-roles="admin">Here's an overview of your support operations.</span>
+                            <span class="d-none" data-visible-roles="agent">Here's your workload and the queue waiting to be claimed.</span>
+                            <span class="d-none" data-visible-roles="customer">Here's an overview of your support requests.</span>
                         </p>
                     </div>
 
                 </div>
 
 
-                <!-- Statistics cards -->
-                <section class="stats-grid" aria-label="Ticket statistics">
+                <!-- Contained statistics error (with Retry), shared by
+                     the role-specific card grids below. -->
+                <div
+                    id="statsAlert"
+                    class="alert d-none"
+                    role="alert"
+                    aria-live="polite"
+                ></div>
+
+
+                <!-- ADMIN: global statistics (staff-only
+                     /api/analytics/summary) + unassigned count -->
+                <section
+                    class="stats-grid stats-grid-5 d-none"
+                    aria-label="Ticket statistics"
+                    data-visible-roles="admin"
+                >
 
                     <article class="stat-card">
 
@@ -206,25 +230,293 @@
 
                     </article>
 
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Unassigned
+                        </div>
+
+                        <div class="stat-card-value" id="unassignedTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Waiting for an agent
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?assigned_to=none"
+                        >
+                            View unassigned &rarr;
+                        </a>
+
+                    </article>
+
                 </section>
 
 
-                <!-- Recent tickets -->
+                <!-- AGENT: personal workload (assigned_to=me) and the
+                     unassigned queue -->
                 <section
-                    class="tickets-section"
+                    class="stats-grid d-none"
+                    aria-label="Your workload"
+                    data-visible-roles="agent"
+                >
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            My Open Tickets
+                        </div>
+
+                        <div class="stat-card-value" id="myOpenTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Assigned to you, status Open
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?assigned_to=me&amp;status=Open"
+                        >
+                            View &rarr;
+                        </a>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            My In Progress Tickets
+                        </div>
+
+                        <div class="stat-card-value" id="myProgressTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Assigned to you, status In Progress
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?assigned_to=me&amp;status=In%20Progress"
+                        >
+                            View &rarr;
+                        </a>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            My Assigned Tickets
+                        </div>
+
+                        <div class="stat-card-value" id="myAssignedTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            All assigned to you, including Resolved
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?assigned_to=me"
+                        >
+                            View &rarr;
+                        </a>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Unassigned Queue
+                        </div>
+
+                        <div class="stat-card-value" id="queueUnassignedTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Available for you to claim
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?assigned_to=none"
+                        >
+                            Browse queue &rarr;
+                        </a>
+
+                    </article>
+
+                </section>
+
+
+                <!-- CUSTOMER: own requests only (the API scopes
+                     /api/tickets to the customer's own tickets) -->
+                <section
+                    class="stats-grid d-none"
+                    aria-label="Your support requests"
+                    data-visible-roles="customer"
+                >
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Total Requests
+                        </div>
+
+                        <div class="stat-card-value" id="customerTotalTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            All requests you have submitted
+                        </p>
+
+                        <a class="stat-card-link" href="/tickets.html">
+                            View all &rarr;
+                        </a>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Open
+                        </div>
+
+                        <div class="stat-card-value" id="customerOpenTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Waiting for our support team
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?status=Open"
+                        >
+                            View &rarr;
+                        </a>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            In Progress
+                        </div>
+
+                        <div class="stat-card-value" id="customerProgressTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Being worked on
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?status=In%20Progress"
+                        >
+                            View &rarr;
+                        </a>
+
+                    </article>
+
+
+                    <article class="stat-card">
+
+                        <div class="stat-card-heading">
+                            Resolved
+                        </div>
+
+                        <div class="stat-card-value" id="customerResolvedTickets">
+                            --
+                        </div>
+
+                        <p class="stat-card-description">
+                            Completed requests
+                        </p>
+
+                        <a
+                            class="stat-card-link"
+                            href="/tickets.html?status=Resolved"
+                        >
+                            View &rarr;
+                        </a>
+
+                    </article>
+
+                </section>
+
+
+                <!-- Quick navigation -->
+                <nav
+                    class="quick-links d-none"
+                    aria-label="Quick links"
+                    data-visible-roles="admin"
+                >
+                    <a class="btn btn-light" href="/tickets.html">All Tickets</a>
+                    <a class="btn btn-light" href="/tickets.html?assigned_to=none">Unassigned Tickets</a>
+                    <a class="btn btn-light" href="/analytics.html">Analytics</a>
+                </nav>
+
+                <nav
+                    class="quick-links d-none"
+                    aria-label="Quick links"
+                    data-visible-roles="agent"
+                >
+                    <a class="btn btn-light" href="/tickets.html?assigned_to=none">Unassigned Queue</a>
+                    <a class="btn btn-light" href="/tickets.html?assigned_to=me">My Tickets</a>
+                    <a class="btn btn-light" href="/tickets.html">All Tickets</a>
+                </nav>
+
+                <nav
+                    class="quick-links d-none"
+                    aria-label="Quick links"
+                    data-visible-roles="customer"
+                >
+                    <a class="btn btn-light" href="/tickets.html">View All My Requests</a>
+                </nav>
+
+
+                <!-- Recent tickets (role-specific content and columns) -->
+                <section
+                    class="tickets-section d-none"
                     id="tickets"
                     aria-labelledby="tickets-heading"
+                    data-visible-roles="admin agent customer"
                 >
 
                     <div class="section-heading">
 
                         <div>
                             <h3 id="tickets-heading">
-                                Recent Tickets
+                                <span class="d-none" data-visible-roles="admin">Recent Tickets</span>
+                                <span class="d-none" data-visible-roles="agent">Recently Assigned to You</span>
+                                <span class="d-none" data-visible-roles="customer">Your Recent Requests</span>
                             </h3>
 
                             <p>
-                                Latest customer support requests
+                                <span class="d-none" data-visible-roles="admin">Latest customer support requests</span>
+                                <span class="d-none" data-visible-roles="agent">Tickets most recently assigned to you</span>
+                                <span class="d-none" data-visible-roles="customer">Your latest support requests</span>
                             </p>
                         </div>
 
@@ -243,21 +535,13 @@
 
                         <table class="table tickets-table">
 
-                            <thead>
-                                <tr>
-                                    <th>Ticket</th>
-                                    <th>Subject</th>
-                                    <th>Category</th>
-                                    <th>Priority</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
+                            <thead id="recentTicketsHead"></thead>
 
                             <tbody id="recentTickets">
 
                                 <tr>
-                                    <td colspan="5" class="empty-state">
-                                        Ticket data will appear here.
+                                    <td colspan="6" class="empty-state">
+                                        Loading tickets...
                                     </td>
                                 </tr>
 
@@ -314,7 +598,10 @@
                             Create Support Ticket
                         </h5>
 
-                        <p class="text-secondary small mb-0">
+                        <p
+                            class="text-secondary small mb-0"
+                            id="createTicketSubtitle"
+                        >
                             Enter the customer's issue details.
                         </p>
                     </div>
@@ -340,7 +627,11 @@
 
                         <div class="mb-3">
 
-                            <label for="requesterName" class="form-label">
+                            <label
+                                for="requesterName"
+                                class="form-label"
+                                id="requesterNameLabel"
+                            >
                                 Customer Name
                             </label>
 
@@ -357,7 +648,11 @@
 
                         <div class="mb-3">
 
-                            <label for="ticketTitle" class="form-label">
+                            <label
+                                for="ticketTitle"
+                                class="form-label"
+                                id="ticketTitleLabel"
+                            >
                                 Ticket Title *
                             </label>
 
@@ -410,7 +705,10 @@
 
                         </div>
 
-                        <p class="text-secondary small mb-0">
+                        <p
+                            class="text-secondary small mb-0"
+                            id="createTicketHelp"
+                        >
                             AI will automatically suggest a category after
                             ticket submission.
                         </p>
@@ -449,6 +747,9 @@
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
         crossorigin="anonymous"
     ></script>
+
+    <!-- Shared utilities (must load before page scripts) -->
+    <script src="./js/common.js" defer></script>
 
     <!-- Dashboard JavaScript -->
     <script src="./js/dashboard.js" defer></script>

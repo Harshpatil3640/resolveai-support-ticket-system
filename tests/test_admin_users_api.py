@@ -37,7 +37,7 @@ from app.db.errors import (
     rollback_failure_of,
 )
 from app.main import DATABASE_ERROR_DETAIL, app
-from app.models import User
+from app.models import Ticket, User
 from app.core.audit_logging import AUDIT_LOGGER_NAME
 from app.services import user_service
 from app.services.auth_service import UserNotFoundError
@@ -2304,12 +2304,15 @@ def test_admin_actions_are_logged_without_secrets(
             **common,
             "role_before": "agent",
             "role_after": "customer",
+            # Phase 7.5: tickets unassigned by the change (none here).
+            "unassigned_tickets": 0,
         },
         {
             "action": "user.deactivate",
             **common,
             "is_active_before": True,
             "is_active_after": False,
+            "unassigned_tickets": 0,
         },
         {
             "action": "user.activate",
@@ -2325,7 +2328,8 @@ def test_admin_actions_are_logged_without_secrets(
     )
     assert records[2].getMessage() == (
         f"admin_action action=user.deactivate actor_id={admin_id} "
-        f"target_user_id={user_id} is_active_before=True is_active_after=False"
+        f"target_user_id={user_id} is_active_before=True is_active_after=False "
+        "unassigned_tickets=0"
     )
 
     # The application's own handler wrote one line per action to stderr.
@@ -2784,3 +2788,180 @@ def test_concurrent_api_creation_by_a_removed_admin_is_refused(
     assert "raced@example.test" not in _emails(engine)
     # Only the deactivation is in the audit log.
     assert [r.admin_action["action"] for r in audit_records] == ["user.deactivate"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5: deactivation and agent role changes unassign tickets
+# ---------------------------------------------------------------------------
+
+TICKET_TITLE_SECRET = "Ticket-title-secret-51d2"
+TICKET_DESCRIPTION_SECRET = "Ticket description secret 8e40"
+
+
+def _assigned_ticket(db: Session, creator_id: int, assignee_id: int, status: str) -> int:
+    ticket = Ticket(
+        title=TICKET_TITLE_SECRET,
+        description=TICKET_DESCRIPTION_SECRET,
+        created_by_user_id=creator_id,
+        status=status,
+        assigned_to_user_id=assignee_id,
+    )
+    db.add(ticket)
+    db.commit()
+
+    return ticket.id
+
+
+def _ticket_rows(db: Session) -> dict[int, tuple]:
+    return {
+        row[0]: tuple(row[1:])
+        for row in db.execute(
+            text("SELECT id, assigned_to_user_id, status, version FROM tickets")
+        )
+    }
+
+
+def _ticket_event_reasons(db: Session) -> list[tuple]:
+    return [
+        tuple(row)
+        for row in db.execute(
+            text("SELECT ticket_id, event_type, reason FROM ticket_events ORDER BY id")
+        )
+    ]
+
+
+@pytest.fixture
+def agent_with_tickets(
+    db_session: Session,
+    agent_user: User,
+    customer_user: User,
+) -> dict[str, int]:
+    return {
+        status: _assigned_ticket(db_session, customer_user.id, agent_user.id, status)
+        for status in ("Open", "In Progress", "Resolved")
+    }
+
+
+@pytest.mark.parametrize(
+    ("url_for", "body", "action", "reason"),
+    [
+        (_status_url, {"is_active": False}, "user.deactivate", "assignee_deactivated"),
+        (_role_url, {"role": "customer"}, "user.role_change", "assignee_role_changed"),
+        (_role_url, {"role": "admin"}, "user.role_change", "assignee_role_changed"),
+    ],
+    ids=["deactivate", "to-customer", "to-admin"],
+)
+def test_user_change_via_api_unassigns_tickets_and_logs_the_count(
+    client: TestClient,
+    db_session: Session,
+    admin_user: User,
+    agent_user: User,
+    admin_headers: dict[str, str],
+    agent_with_tickets: dict[str, int],
+    audit_records: list[logging.LogRecord],
+    capsys: pytest.CaptureFixture[str],
+    url_for: Callable[[int], str],
+    body: dict,
+    action: str,
+    reason: str,
+) -> None:
+    agent_id, open_id, progress_id, resolved_id = (
+        agent_user.id,
+        agent_with_tickets["Open"],
+        agent_with_tickets["In Progress"],
+        agent_with_tickets["Resolved"],
+    )
+
+    response = client.patch(url_for(agent_id), json=body, headers=admin_headers)
+
+    # Phase 6 response is unchanged.
+    assert response.status_code == 200
+    assert set(response.json()) == {"id", "name", "email", "role", "is_active", "created_at"}
+
+    rows = _ticket_rows(db_session)
+
+    assert rows[open_id] == (None, "Open", 2)
+    assert rows[progress_id] == (None, "Open", 2)
+    assert rows[resolved_id] == (agent_id, "Resolved", 1)
+    assert _ticket_event_reasons(db_session) == [
+        (open_id, "unassigned", reason),
+        (progress_id, "unassigned", reason),
+    ]
+
+    [record] = audit_records
+
+    assert record.admin_action["action"] == action
+    assert record.admin_action["unassigned_tickets"] == 2
+    assert record.getMessage().endswith(" unassigned_tickets=2")
+
+    output = capsys.readouterr().err
+
+    assert "unassigned_tickets=2" in output
+
+    for secret in (
+        agent_user.email,
+        agent_user.name,
+        admin_user.email,
+        TICKET_TITLE_SECRET,
+        TICKET_DESCRIPTION_SECRET,
+    ):
+        assert secret not in output
+        assert secret not in record.getMessage()
+
+
+def test_reactivation_logs_no_ticket_count_and_restores_nothing(
+    client: TestClient,
+    db_session: Session,
+    agent_user: User,
+    admin_headers: dict[str, str],
+    agent_with_tickets: dict[str, int],
+    audit_records: list[logging.LogRecord],
+) -> None:
+    client.patch(_status_url(agent_user.id), json={"is_active": False}, headers=admin_headers)
+    after_deactivation = _ticket_rows(db_session)
+
+    response = client.patch(
+        _status_url(agent_user.id), json={"is_active": True}, headers=admin_headers
+    )
+
+    assert response.status_code == 200
+    assert _ticket_rows(db_session) == after_deactivation
+    assert "unassigned_tickets" not in audit_records[-1].admin_action
+    assert audit_records[-1].admin_action["action"] == "user.activate"
+
+
+@pytest.mark.parametrize(
+    ("url_for", "body"),
+    [(_status_url, {"is_active": False}), (_role_url, {"role": "customer"})],
+    ids=["deactivate", "demote"],
+)
+def test_failed_transaction_writes_no_audit_log_and_changes_nothing(
+    client: TestClient,
+    db_session: Session,
+    agent_user: User,
+    admin_headers: dict[str, str],
+    agent_with_tickets: dict[str, int],
+    audit_records: list[logging.LogRecord],
+    monkeypatch: pytest.MonkeyPatch,
+    url_for: Callable[[int], str],
+    body: dict,
+) -> None:
+    from app.services import ticket_workflow
+
+    agent_id = agent_user.id
+    tickets_before = _ticket_rows(db_session)
+    user_before = _stored(db_session, agent_id)
+    monkeypatch.setattr(
+        ticket_workflow,
+        "record_ticket_event",
+        _raiser(_operation_error("INSERT INTO ticket_events (reason) VALUES (?)")),
+    )
+
+    response = client.patch(url_for(agent_id), json=body, headers=admin_headers)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": DATABASE_ERROR_DETAIL}
+    assert audit_records == []
+    assert _ticket_rows(db_session) == tickets_before
+    assert _ticket_event_reasons(db_session) == []
+    assert _stored(db_session, agent_id) == user_before

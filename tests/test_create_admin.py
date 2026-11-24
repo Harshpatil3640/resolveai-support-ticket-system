@@ -28,7 +28,7 @@ from app.scripts import create_admin as create_admin_module
 from app.services import user_service
 
 
-HEAD_REVISION = "0002"
+HEAD_REVISION = "0003"
 
 ADMIN_PASSWORD = "Admin-Bootstrap-Passphrase-42"
 

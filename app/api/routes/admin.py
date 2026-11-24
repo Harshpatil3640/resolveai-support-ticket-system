@@ -24,7 +24,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.api.dependencies import FORBIDDEN_DETAIL, require_admin
-from app.core.audit_logging import configure_audit_logging
+from app.core.audit_logging import log_admin_action
 from app.core.roles import UserRole
 from app.db.database import get_db
 from app.db.errors import describe_rollback_failure, rollback_failure_of
@@ -124,39 +124,9 @@ def _loggable_role(role: object) -> str:
     return role if isinstance(role, str) and role in _KNOWN_ROLES else "unrecognised"
 
 
-def log_admin_action(
-    action: str,
-    *,
-    actor_id: int,
-    target_user_id: int,
-    **values: str | bool,
-) -> None:
-    """Record an administrative action in the audit log (INFO).
-
-    Called only after the action's transaction has committed. Only IDs,
-    the action name and role/status values are logged; never names,
-    emails, passwords, hashes, tokens or request bodies. The same fields
-    are attached to the record as ``record.admin_action`` for structured
-    log handlers.
-    """
-
-    fields: dict[str, str | int | bool] = {
-        "action": action,
-        "actor_id": actor_id,
-        "target_user_id": target_user_id,
-        **values,
-    }
-
-    # Idempotent and operator-respecting. Makes the audit log work in an
-    # application that mounts this router without importing app.main, and
-    # re-enables the logger if a later logging configuration disabled it.
-    audit_logger = configure_audit_logging()
-
-    audit_logger.info(
-        "admin_action %s",
-        " ".join(f"{key}={value}" for key, value in fields.items()),
-        extra={"admin_action": fields},
-    )
+# log_admin_action (imported above from app.core.audit_logging, where the
+# ticket audit records are written too) is called after each change has
+# committed; it remains importable from this module.
 
 
 def _log_rollback_failure(error: BaseException) -> None:
@@ -352,12 +322,14 @@ def change_user_role_endpoint(
         ) from None
 
     if change.changed:
+        # Captured before the commit: no database access is needed here.
         log_admin_action(
             "user.role_change",
             actor_id=actor_id,
             target_user_id=user_id,
             role_before=_loggable_role(change.previous_role),
             role_after=_loggable_role(change.new_role),
+            unassigned_tickets=len(change.unassigned_ticket_ids),
         )
 
     return UserRead.model_validate(change.user)
@@ -409,12 +381,20 @@ def set_user_status_endpoint(
         ) from None
 
     if change.changed:
+        values: dict[str, bool | int] = {
+            "is_active_before": change.was_active,
+            "is_active_after": change.is_active,
+        }
+
+        if not change.is_active:
+            # Captured before the commit: no database access is needed.
+            values["unassigned_tickets"] = len(change.unassigned_ticket_ids)
+
         log_admin_action(
             "user.activate" if change.is_active else "user.deactivate",
             actor_id=actor_id,
             target_user_id=user_id,
-            is_active_before=change.was_active,
-            is_active_after=change.is_active,
+            **values,
         )
 
     return UserRead.model_validate(change.user)

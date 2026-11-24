@@ -90,4 +90,6 @@ require_any_role = require_roles(
 
 require_admin = require_roles(UserRole.ADMIN)
 
+require_agent = require_roles(UserRole.AGENT)
+
 require_agent_or_admin = require_roles(UserRole.AGENT, UserRole.ADMIN)

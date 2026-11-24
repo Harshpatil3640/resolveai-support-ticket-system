@@ -11,7 +11,9 @@ creating an account as an administrator and changing a user's role or
 active status) are used by the admin-only API. Role and status changes
 enforce the "at least one active administrator" rule, and every change
 re-checks the acting administrator, inside a serialised transaction; see
-``change_user_role`` and ``create_user_as_admin``.
+``change_user_role`` and ``create_user_as_admin``. Deactivating a user, or
+an agent losing the agent role, also unassigns their unresolved tickets
+in that same transaction (``app.services.ticket_workflow``).
 """
 
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.roles import UserRole
 from app.core.security import hash_password
+from app.db import locking as _locking
 from app.db.errors import (
     record_rollback_failure,
     roll_back_keeping_primary,
@@ -32,6 +35,16 @@ from app.db.errors import (
 )
 from app.models import User
 from app.services.auth_service import UserNotFoundError, invalidate_user_sessions
+from app.services.ticket_workflow import (
+    ASSIGNABLE_ROLES,
+    REASON_ASSIGNEE_DEACTIVATED,
+    REASON_ASSIGNEE_ROLE_CHANGED,
+    unassign_open_tickets_for_user,
+)
+from app.services.user_locking import (
+    active_administrator_ids_for_update,
+    lock_active_administrator_ids,
+)
 
 
 MIN_PASSWORD_LENGTH = 12
@@ -428,13 +441,19 @@ class AdministratorRequiredError(UserServiceError, PermissionError):
     """
 
 
-class TransactionAlreadyStartedError(UserServiceError, RuntimeError):
+class TransactionAlreadyStartedError(
+    UserServiceError,
+    _locking.TransactionAlreadyStartedError,
+):
     """The session already has a database write transaction in progress.
 
     A role or status change must start its own serialised transaction (it
     takes SQLite's write lock before reading), so it refuses to run inside
     a transaction that has already written. This is a programming error,
     never a client error.
+
+    A ``UserServiceError`` and, through the shared locking module's error
+    (``app.db.locking.TransactionAlreadyStartedError``), a ``RuntimeError``.
     """
 
 
@@ -444,12 +463,17 @@ class RoleChange:
 
     ``changed`` is False when the user already had the requested role;
     nothing was written in that case.
+
+    ``unassigned_ticket_ids``: the Open and In Progress tickets unassigned
+    because an agent lost the agent role (ascending; empty otherwise).
+    Captured before the commit, so it needs no database access.
     """
 
     user: User
     previous_role: str
     new_role: str
     changed: bool
+    unassigned_ticket_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -459,12 +483,17 @@ class StatusChange:
     ``changed`` is False when the account already had the requested
     status; nothing was written (and ``token_version`` was not
     incremented) in that case.
+
+    ``unassigned_ticket_ids``: the Open and In Progress tickets unassigned
+    by a deactivation (ascending; empty otherwise). Captured before the
+    commit, so it needs no database access.
     """
 
     user: User
     was_active: bool
     is_active: bool
     changed: bool
+    unassigned_ticket_ids: tuple[int, ...] = ()
 
 
 def get_user(db: Session, user_id: int) -> User | None:
@@ -579,18 +608,9 @@ def list_users(
 #   then re-reads the locked rows.
 
 
-def _active_administrators_for_update() -> Select:
-    """IDs of the active administrators, locked where supported."""
-
-    return (
-        select(User.id)
-        .where(
-            User.role == UserRole.ADMIN.value,
-            User.is_active.is_(True),
-        )
-        .order_by(User.id)
-        .with_for_update()
-    )
+# The shared query (app.services.user_locking), kept under this module's
+# original name for existing callers.
+_active_administrators_for_update = active_administrator_ids_for_update
 
 
 def _user_for_update(user_id: int) -> Select:
@@ -609,29 +629,29 @@ def _user_for_update(user_id: int) -> Select:
 def _begin_serialised_change(db: Session) -> None:
     """Start the transaction for a role or status change, write-locked.
 
-    On SQLite this takes the database write lock (BEGIN IMMEDIATE) before
+    Delegates to the shared ``app.db.locking.begin_serialised_change``:
+    on SQLite it takes the database write lock (BEGIN IMMEDIATE) before
     anything is read. Other databases rely on the FOR UPDATE row locks
     taken by the reads that follow.
+
+    ``_lock_for_change`` calls this module-level function, so it can be
+    replaced in tests to run a change without the lock.
 
     Raises:
         TransactionAlreadyStartedError: the session's SQLite connection is
             already inside a transaction (something was written earlier),
-            so BEGIN IMMEDIATE cannot be issued.
+            so BEGIN IMMEDIATE cannot be issued. Raised as this module's
+            subclass, with this module's original message.
         sqlalchemy.exc.OperationalError: the lock was not released by a
             concurrent change within the busy timeout.
     """
 
-    connection = db.connection()
-
-    if connection.dialect.name != "sqlite":
-        return
-
-    if connection.connection.driver_connection.in_transaction:
+    try:
+        _locking.begin_serialised_change(db)
+    except _locking.TransactionAlreadyStartedError:
         raise TransactionAlreadyStartedError(
             "A role or status change must start a new transaction."
-        )
-
-    connection.exec_driver_sql("BEGIN IMMEDIATE")
+        ) from None
 
 
 def _lock_for_change(db: Session, user_id: int) -> tuple[User | None, list[int]]:
@@ -645,8 +665,10 @@ def _lock_for_change(db: Session, user_id: int) -> tuple[User | None, list[int]]
 
     _begin_serialised_change(db)
 
-    # Administrator rows first, then the target, always in this order.
-    active_admin_ids = list(db.scalars(_active_administrators_for_update()))
+    # Administrator rows first, then the target, always in this order
+    # (the global lock order of app.services.user_locking; ticket rows,
+    # where a change touches them, come last).
+    active_admin_ids = lock_active_administrator_ids(db)
     target = db.scalars(_user_for_update(user_id)).one_or_none()
 
     return target, active_admin_ids
@@ -709,6 +731,14 @@ def change_user_role(
     re-read from the database on every request, so the change takes
     effect immediately for tokens the user already holds.
 
+    When an agent (stored role exactly ``agent``) gets a role that cannot
+    be assigned tickets (``admin`` or ``customer``), their Open and
+    In Progress tickets are unassigned in the same transaction (In
+    Progress returns to Open; Resolved tickets keep their assignee), each
+    with an ``assignee_role_changed`` history event; see
+    ``app.services.ticket_workflow.unassign_open_tickets_for_user``.
+    Other role changes touch no ticket.
+
     The function owns the session's transaction: it commits on success
     (also when nothing changed, to release the lock) and rolls back on ANY
     failure before re-raising the original exception; a failed rollback
@@ -747,7 +777,18 @@ def change_user_role(
 
         _ensure_actor_is_active_administrator(active_admin_ids, actor_id)
 
+        unassigned_ids: list[int] = []
+
         if changed:
+            if _loses_assignability(previous_role, new_role):
+                # Ticket rows are locked after the user rows (global order).
+                unassigned_ids = unassign_open_tickets_for_user(
+                    db,
+                    actor_id=actor_id,
+                    user_id=user_id,
+                    reason=REASON_ASSIGNEE_ROLE_CHANGED,
+                )
+
             target.role = new_role.value
             db.flush()
 
@@ -766,7 +807,18 @@ def change_user_role(
         previous_role=previous_role,
         new_role=new_role.value,
         changed=changed,
+        unassigned_ticket_ids=tuple(unassigned_ids),
     )
+
+
+def _loses_assignability(previous_role: str, new_role: UserRole) -> bool:
+    """Whether a role change takes away the ability to hold tickets.
+
+    Only an exact stored ``agent`` role is assignable, so legacy spellings
+    never count as losing it.
+    """
+
+    return previous_role in ASSIGNABLE_ROLES and new_role not in ASSIGNABLE_ROLES
 
 
 def set_user_active_status(
@@ -794,6 +846,15 @@ def set_user_active_status(
     too: tokens issued before a deactivation never become valid again.
     Requesting the status the account already has changes nothing, does
     not increment ``token_version``, and returns ``changed=False``.
+
+    A real deactivation also unassigns the user's Open and In Progress
+    tickets in the same transaction (In Progress returns to Open; Resolved
+    tickets keep their assignee), each with an ``assignee_deactivated``
+    history event; see
+    ``app.services.ticket_workflow.unassign_open_tickets_for_user``. Only
+    agents can be assigned tickets, but any deactivated account is
+    covered, so no unresolved ticket can stay with an inactive user.
+    Reactivation does not restore earlier assignments.
 
     Transaction ownership, failure handling and the returned user's state
     are as for ``change_user_role``.
@@ -831,9 +892,21 @@ def set_user_active_status(
 
         _ensure_actor_is_active_administrator(active_admin_ids, actor_id)
 
+        unassigned_ids: list[int] = []
+
         if changed:
-            # Status first: if this UPDATE fails, token_version is never
-            # incremented. Both are committed together below.
+            if not is_active:
+                # Ticket rows are locked after the user rows (global order).
+                unassigned_ids = unassign_open_tickets_for_user(
+                    db,
+                    actor_id=actor_id,
+                    user_id=user_id,
+                    reason=REASON_ASSIGNEE_DEACTIVATED,
+                )
+
+            # Status before token_version: if this UPDATE fails,
+            # token_version is never incremented. Everything (tickets,
+            # events, status, token version) is committed together below.
             target.is_active = is_active
             db.flush()
             invalidate_user_sessions(db, target, commit=False)
@@ -853,6 +926,7 @@ def set_user_active_status(
         was_active=was_active,
         is_active=is_active,
         changed=changed,
+        unassigned_ticket_ids=tuple(unassigned_ids),
     )
 
 

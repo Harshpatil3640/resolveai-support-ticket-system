@@ -26,6 +26,16 @@ def auth_headers(agent_headers: dict[str, str]) -> dict[str, str]:
     return agent_headers
 
 
+def _assign(db_session: Session, ticket: Ticket, user: User) -> None:
+    """Test setup: assign ``ticket`` to ``user`` directly in the database.
+
+    Since Phase 7 an agent may only edit tickets assigned to them.
+    """
+
+    ticket.assigned_to_user_id = user.id
+    db_session.commit()
+
+
 def test_create_ticket_success(
     client: TestClient,
     db_session: Session,
@@ -380,12 +390,15 @@ def test_get_ticket_by_id_rejects_invalid_id(
 
 def test_update_ticket_success(
     client: TestClient,
+    db_session: Session,
+    api_user: User,
     sample_tickets: list[Ticket],
     auth_headers: dict[str, str],
 ) -> None:
-    """Verify that an agent can update a ticket."""
+    """Verify that an agent can update a ticket assigned to them."""
 
     ticket = sample_tickets[0]
+    _assign(db_session, ticket, api_user)
 
     response = client.patch(
         f"/api/tickets/{ticket.id}",
@@ -407,12 +420,15 @@ def test_update_ticket_success(
 
 def test_update_ticket_partial_update(
     client: TestClient,
+    db_session: Session,
+    api_user: User,
     sample_tickets: list[Ticket],
     auth_headers: dict[str, str],
 ) -> None:
     """Verify that updating one field preserves other fields."""
 
     ticket = sample_tickets[0]
+    _assign(db_session, ticket, api_user)
 
     response = client.patch(
         f"/api/tickets/{ticket.id}",
@@ -739,7 +755,16 @@ def test_agent_can_correct_category_without_changing_ai_prediction(
     assert created_ticket["predicted_category"] == "PAYMENT"
     assert created_ticket["category"] is None
 
-    # Step 2: Agent corrects the final category.
+    # Step 2: Agent claims the ticket (agents edit only their own tickets).
+    claim_response = client.post(
+        f"/api/tickets/{ticket_id}/claim",
+        json={"expected_version": created_ticket["version"]},
+        headers=auth_headers,
+    )
+
+    assert claim_response.status_code == 200
+
+    # Step 3: Agent corrects the final category.
     update_response = client.patch(
         f"/api/tickets/{ticket_id}",
         json={
@@ -759,7 +784,7 @@ def test_agent_can_correct_category_without_changing_ai_prediction(
     # Human-assigned category should contain the correction.
     assert updated_ticket["category"] == "ORDER"
 
-    # Step 3: Verify persisted database values.
+    # Step 4: Verify persisted database values.
     saved_ticket = db_session.get(Ticket, ticket_id)
 
     assert saved_ticket is not None
@@ -1181,13 +1206,17 @@ def test_agent_can_retrieve_customer_ticket(
 
 def test_agent_can_update_customer_ticket(
     client: TestClient,
+    db_session: Session,
     customer_user: User,
     customer_tickets: list[Ticket],
+    agent_user: User,
     agent_headers: dict[str, str],
 ) -> None:
-    """Agents can update customer tickets without changing ownership."""
+    """Agents can update customer tickets assigned to them, without
+    changing ownership."""
 
     ticket = customer_tickets[0]
+    _assign(db_session, ticket, agent_user)
 
     response = client.patch(
         f"/api/tickets/{ticket.id}",
@@ -1202,6 +1231,43 @@ def test_agent_can_update_customer_ticket(
     assert data["status"] == "In Progress"
     assert data["category"] == "Payments"
     assert data["created_by_user_id"] == customer_user.id
+    assert data["assigned_to_user_id"] == agent_user.id
+
+
+@pytest.mark.parametrize("assigned_to", ["nobody", "another agent"])
+def test_agent_cannot_update_a_ticket_not_assigned_to_them(
+    client: TestClient,
+    db_session: Session,
+    create_user: Callable[..., User],
+    customer_tickets: list[Ticket],
+    agent_headers: dict[str, str],
+    assigned_to: str,
+) -> None:
+    """Since Phase 7 agents edit only the tickets assigned to them."""
+
+    ticket = customer_tickets[0]
+
+    if assigned_to == "another agent":
+        other = create_user(email="other.agent@example.test", role="agent")
+        _assign(db_session, ticket, other)
+
+    version_before = ticket.version
+
+    response = client.patch(
+        f"/api/tickets/{ticket.id}",
+        json={"category": "Payments"},
+        headers=agent_headers,
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "You do not have permission to perform this action."
+    }
+
+    db_session.refresh(ticket)
+
+    assert ticket.category == "Billing"
+    assert ticket.version == version_before
 
 
 def test_agent_cannot_change_ticket_owner(
@@ -1292,13 +1358,20 @@ def test_admin_can_retrieve_customer_ticket(
 
 def test_admin_can_update_ticket(
     client: TestClient,
+    db_session: Session,
     customer_user: User,
     customer_tickets: list[Ticket],
+    agent_user: User,
     admin_headers: dict[str, str],
 ) -> None:
-    """Admins can update tickets."""
+    """Admins can update tickets, including tickets assigned to agents.
+
+    Open -> Resolved requires an assignee (Phase 7 workflow), so the
+    ticket is assigned first.
+    """
 
     ticket = customer_tickets[0]
+    _assign(db_session, ticket, agent_user)
 
     response = client.patch(
         f"/api/tickets/{ticket.id}",
@@ -1313,6 +1386,42 @@ def test_admin_can_update_ticket(
     assert data["priority"] == "Low"
     assert data["status"] == "Resolved"
     assert data["created_by_user_id"] == customer_user.id
+
+
+def test_admin_can_edit_an_unassigned_ticket_but_not_bypass_the_workflow(
+    client: TestClient,
+    db_session: Session,
+    customer_tickets: list[Ticket],
+    admin_headers: dict[str, str],
+) -> None:
+    """The generic PATCH applies the same status rules as /status."""
+
+    ticket = customer_tickets[0]
+
+    edited = client.patch(
+        f"/api/tickets/{ticket.id}",
+        json={"priority": "Low"},
+        headers=admin_headers,
+    )
+
+    assert edited.status_code == 200
+    assert edited.json()["priority"] == "Low"
+
+    bypass = client.patch(
+        f"/api/tickets/{ticket.id}",
+        json={"priority": "Medium", "status": "Resolved"},
+        headers=admin_headers,
+    )
+
+    assert bypass.status_code == 409
+    assert bypass.json() == {
+        "detail": "The ticket must be assigned before this status change."
+    }
+
+    db_session.refresh(ticket)
+
+    # Nothing from the rejected request was saved, not even the priority.
+    assert (ticket.status, ticket.priority) == ("Open", "Low")
 
 
 def test_admin_can_delete_customer_ticket(

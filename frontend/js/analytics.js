@@ -4,86 +4,21 @@
 // RESOLVEAI - ANALYTICS FUNCTIONALITY
 // =========================================
 
-const TOKEN_KEY = "resolveai_access_token";
+// Shared authentication, API error and role helpers (common.js).
+const {
+    authenticatedFetch,
+    checkApiResponse,
+    getAccessToken,
+    requireAuthentication,
+    initialiseUserInterface,
+    bindLogoutButton,
+    isStaff
+} = window.ResolveAI;
 
 const logoutButton = document.getElementById("logoutButton");
 const analyticsPageAlert = document.getElementById("analyticsPageAlert");
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
-
-
-// =========================================
-// AUTHENTICATION
-// =========================================
-
-function getAccessToken() {
-    return sessionStorage.getItem(TOKEN_KEY);
-}
-
-
-function redirectToLogin() {
-    sessionStorage.removeItem(TOKEN_KEY);
-    window.location.replace("/");
-}
-
-
-// =========================================
-// AUTHENTICATED API REQUEST
-// =========================================
-
-async function authenticatedFetch(url, options = {}) {
-    const token = getAccessToken();
-
-    if (!token) {
-        redirectToLogin();
-        throw new Error("Authentication required.");
-    }
-
-    const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${token}`);
-
-    const response = await fetch(url, {
-        ...options,
-        headers
-    });
-
-    if (response.status === 401) {
-        redirectToLogin();
-        throw new Error("Your session has expired.");
-    }
-
-    return response;
-}
-
-
-// =========================================
-// API ERROR HANDLING
-// =========================================
-
-async function checkApiResponse(response, fallbackMessage) {
-    if (response.ok) {
-        return;
-    }
-
-    let errorMessage = fallbackMessage;
-
-    try {
-        const data = await response.json();
-
-        if (typeof data.detail === "string") {
-            errorMessage = data.detail;
-        } else if (Array.isArray(data.detail)) {
-            errorMessage = data.detail
-                .map(error => error.msg)
-                .join(". ");
-        }
-    } catch {
-        // Retain the fallback message if the response
-        // does not contain readable JSON.
-    }
-
-    throw new Error(errorMessage);
-}
 
 
 // =========================================
@@ -173,51 +108,6 @@ function formatDateLabel(dateString) {
         day: "2-digit",
         month: "short"
     }).format(date);
-}
-
-
-// =========================================
-// LOAD AUTHENTICATED AGENT PROFILE
-// =========================================
-
-async function loadAgentProfile() {
-    try {
-        const response = await authenticatedFetch(
-            "/api/auth/me"
-        );
-
-        await checkApiResponse(
-            response,
-            "Unable to retrieve your profile."
-        );
-
-        const user = await response.json();
-
-        setElementText("agentName", user.name);
-
-        const formattedRole = user.role
-            .replace(/_/g, " ")
-            .replace(/\b\w/g, character =>
-                character.toUpperCase()
-            );
-
-        setElementText("agentRole", formattedRole);
-
-        const initials = user.name
-            .trim()
-            .split(/\s+/)
-            .slice(0, 2)
-            .map(name => name.charAt(0))
-            .join("")
-            .toUpperCase();
-
-        setElementText("agentAvatar", initials || "AG");
-
-    } catch (error) {
-        if (getAccessToken()) {
-            showAnalyticsMessage(error.message);
-        }
-    }
 }
 
 
@@ -830,63 +720,38 @@ async function loadModelPerformance() {
 
 
 // =========================================
-// LOGOUT
-// =========================================
-
-async function logout() {
-    logoutButton.disabled = true;
-    logoutButton.textContent = "Logging out...";
-
-    try {
-        const response = await authenticatedFetch(
-            "/api/auth/logout",
-            {
-                method: "POST"
-            }
-        );
-
-        await checkApiResponse(
-            response,
-            "Unable to complete logout. Please try again."
-        );
-
-        // Clear browser session after successful revocation.
-        sessionStorage.removeItem(TOKEN_KEY);
-
-        window.location.replace("/");
-
-    } catch (error) {
-        if (getAccessToken()) {
-            showAnalyticsMessage(error.message);
-
-            logoutButton.disabled = false;
-            logoutButton.textContent = "Logout";
-        }
-    }
-}
-
-
-// =========================================
 // INITIALISE ANALYTICS PAGE
 // =========================================
 
 async function initialiseAnalytics() {
-    const token = getAccessToken();
-
-    if (!token) {
-        redirectToLogin();
+    if (!requireAuthentication()) {
         return;
     }
 
     // Register logout functionality.
-    logoutButton.addEventListener(
-        "click",
-        logout
-    );
+    bindLogoutButton(logoutButton, showAnalyticsMessage);
 
-    // Load profile and analytics independently.
+    // Confirm the role before requesting the staff-only analytics
+    // endpoints. The analytics sections stay hidden unless the user
+    // is an admin or agent.
+    const user = await initialiseUserInterface({
+        onError: showAnalyticsMessage
+    });
+
+    if (!user) {
+        return;
+    }
+
+    if (!isStaff(user)) {
+        showAnalyticsMessage(
+            "Analytics is available to support staff only.",
+            "warning"
+        );
+        return;
+    }
+
+    // Load analytics independently.
     await Promise.all([
-        loadAgentProfile(),
         loadOperationsAnalytics(),
         loadModelPerformance()
     ]);

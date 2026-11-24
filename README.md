@@ -2,30 +2,56 @@
 
 ResolveAI is an AI-powered customer support ticket management system built using Python, FastAPI, SQLAlchemy, SQLite and Machine Learning.
 
-The system allows support agents to create, manage and classify customer support tickets. A machine-learning classifier predicts the most likely ticket category when a ticket is created, while the human agent retains control over the final classification.
+The system serves three roles. **Customers** submit and follow their own support requests. **Agents** claim tickets from a shared queue and work on the tickets assigned to them. **Administrators** assign and reassign work, manage user accounts and oversee the whole queue. A machine-learning classifier predicts the most likely ticket category when a ticket is created, while people retain control over the final classification.
 
 ## Key Features
 
 ### Ticket Management
-- Create support tickets.
+- Create support tickets (every role); customers see only their own.
 - Retrieve individual tickets.
-- List tickets with filtering and pagination.
+- List tickets with filtering, pagination and an exact total (`X-Total-Count`).
 - Search tickets by title and description.
-- Update ticket information.
-- Delete tickets.
+- Update ticket information (administrators, or the assigned agent).
+- Delete tickets (administrators).
+
+### Ticket Assignment and Agent Workflow
+- Administrators assign, reassign and unassign tickets to active agents.
+- Agents claim unassigned Open or In Progress tickets from the queue.
+- Status transitions follow fixed rules (for example, a Resolved ticket can
+  be reopened as In Progress but never set back to Open).
+- Persistent ticket history: creation, assignment, reassignment,
+  unassignment and status changes, with the acting user and time.
+- Optimistic concurrency: every change checks the ticket's version, so
+  simultaneous edits never silently overwrite each other (`409`).
+- Deactivating an agent, or removing their agent role, automatically
+  unassigns their unresolved tickets in the same transaction.
+- Customer privacy: customers see whether a request is being handled, never
+  which agent is handling it.
+
+See [Ticket Assignment and Agent Workflow](#ticket-assignment-and-agent-workflow).
 
 ### Authentication and Security
 - JWT-based authentication.
 - Password hashing.
 - Protected API endpoints.
 - Token revocation during logout.
-- Role-based access control with three roles: `admin`, `agent` and `customer`.
+- Role-based access control with three roles: `admin`, `agent` and `customer`,
+  enforced by the API on every request.
 
 ### User Administration
 - Admin-only API to list, search, filter, retrieve and create user accounts.
 - Role changes and account activation/deactivation, effective immediately.
 - Safeguards against self-demotion, self-deactivation and removing the last active administrator.
-- Administrative actions recorded in a dedicated audit log (`resolveai.audit`).
+- Administrative and ticket workflow actions recorded in a dedicated audit log (`resolveai.audit`).
+
+### Web Frontend
+- Role-specific dashboards: global statistics and the unassigned count for
+  administrators, a personal workload view for agents, and a self-service
+  view for customers.
+- Ticket list with search, filters, an assignment filter and pagination.
+- Ticket details with editing, assignment (administrators), claiming
+  (agents) and an activity timeline (staff).
+- Operations analytics and model evaluation for staff.
 
 ### AI Ticket Classification
 - Automatic category prediction during ticket creation.
@@ -51,6 +77,8 @@ The system allows support agents to create, manage and classify customer support
 | Backend Framework | FastAPI |
 | Database | SQLite |
 | ORM | SQLAlchemy |
+| Schema Migrations | Alembic |
+| Frontend | HTML, CSS, vanilla JavaScript, Bootstrap 5.3.8 |
 | Data Processing | Pandas, NumPy |
 | Machine Learning | Scikit-learn |
 | Text Vectorisation | TF-IDF |
@@ -69,21 +97,77 @@ The project follows a modular monolithic architecture.
 resolveai-support-ticket-system/
 │
 ├── app/
+│   ├── main.py                    # FastAPI app, routers, static frontend
 │   ├── api/
+│   │   ├── dependencies.py        # current user and role requirements
 │   │   └── routes/
-│   │       ├── admin.py
-│   │       ├── auth.py
-│   │       └── tickets.py
+│   │       ├── admin.py           # user management (admin only)
+│   │       ├── analytics.py       # statistics and model performance (staff)
+│   │       ├── auth.py            # login, logout, current user
+│   │       └── tickets.py         # tickets, assignment, claim, status, history
 │   │
 │   ├── core/
+│   │   ├── audit_logging.py       # resolveai.audit logger and record helpers
+│   │   ├── config.py
+│   │   ├── roles.py               # admin, agent, customer
+│   │   └── security.py            # password hashing and JWTs
+│   │
 │   ├── db/
+│   │   ├── database.py            # engine and sessions
+│   │   ├── locking.py             # shared serialised transactions
+│   │   ├── migrations.py          # migration and head-schema checks
+│   │   ├── check_baseline.py      # verify/stamp pre-Alembic databases
+│   │   ├── init_db.py
+│   │   ├── errors.py
+│   │   ├── safe_logging.py
+│   │   ├── schema_inspection.py
+│   │   └── base.py
+│   │
 │   ├── models/
-│   ├── schemas/
+│   │   ├── user.py
+│   │   ├── ticket.py
+│   │   ├── ticket_event.py        # ticket history
+│   │   └── revoked_token.py
+│   │
+│   ├── schemas/                   # admin, analytics, auth, ticket
+│   │
 │   ├── services/
+│   │   ├── auth_service.py
+│   │   ├── ticket_service.py      # create, list, count, delete
+│   │   ├── ticket_workflow.py     # assignment, claim, status, edits, history
+│   │   ├── user_service.py        # user administration
+│   │   ├── user_locking.py        # shared administrator row locks
+│   │   └── analytics_service.py
+│   │
+│   ├── scripts/
+│   │   ├── create_admin.py
+│   │   ├── create_agent.py
+│   │   ├── reset_agent_password.py
+│   │   └── provisioning.py
 │   │
 │   └── ml/
 │       ├── __init__.py
 │       └── predictor.py
+│
+├── alembic/
+│   ├── env.py
+│   └── versions/
+│       ├── 0001_baseline_schema.py
+│       ├── 0002_add_users_token_version.py
+│       └── 0003_ticket_assignment_and_events.py
+│
+├── frontend/
+│   ├── index.html                 # sign-in
+│   ├── dashboard.html             # role-specific dashboards
+│   ├── tickets.html               # ticket list and details
+│   ├── analytics.html             # staff analytics
+│   ├── css/                       # style, dashboard, tickets, analytics
+│   └── js/
+│       ├── common.js              # shared auth, requests, roles
+│       ├── app.js                 # sign-in
+│       ├── dashboard.js
+│       ├── tickets.js
+│       └── analytics.js
 │
 ├── ml/
 │   ├── inspect_dataset.py
@@ -115,13 +199,19 @@ resolveai-support-ticket-system/
 │   ├── final_test_metrics.json
 │   └── final_test_confusion_matrix.csv
 │
-├── tests/
+├── tests/                       # pytest suite (in-memory/temporary databases)
 │
 ├── docs/
+│   ├── architecture.md
+│   ├── database-migrations.md
+│   └── requirements.md
 │
+├── .env.example
 ├── .gitignore
+├── alembic.ini
 ├── requirements.txt
 ├── LICENSE
+├── THIRD_PARTY_NOTICES.md
 └── README.md
 ```
 
@@ -256,12 +346,14 @@ The trained classifier is integrated into the ticket creation endpoint.
 
 ### Ticket Creation Workflow
 
-1. An authenticated agent submits a ticket.
+1. An authenticated user (customer, agent or administrator) submits a ticket.
 2. The API sends the ticket description to the AI predictor.
 3. The predictor returns a category and probability estimate.
 4. The API stores the prediction separately from the final category.
-5. The ticket is saved in the database.
-6. The agent can confirm or correct the final category.
+5. The ticket and its `created` history event are saved together; the
+   ticket starts Open and unassigned.
+6. An administrator or the assigned agent can confirm or correct the final
+   category.
 
 Prediction failure does not prevent ticket creation. In that situation, the prediction fields remain empty.
 
@@ -287,21 +379,37 @@ All ticket endpoints require authentication.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/api/auth/login` | Authenticate an agent |
-| GET | `/api/auth/me` | Retrieve the authenticated agent profile |
+| POST | `/api/auth/login` | Authenticate a user |
+| GET | `/api/auth/me` | Retrieve the authenticated user's profile (including role) |
 | POST | `/api/auth/logout` | Revoke the current access token |
 
 ### Tickets
 
+| Method | Endpoint | Roles | Description |
+|---|---|---|---|
+| POST | `/api/tickets` | all | Create a ticket with AI prediction |
+| GET | `/api/tickets` | all | List and filter tickets (customers: their own) |
+| GET | `/api/tickets/{ticket_id}` | all | Retrieve a ticket (customers: their own) |
+| PATCH | `/api/tickets/{ticket_id}` | admin, assigned agent | Update ticket information |
+| DELETE | `/api/tickets/{ticket_id}` | admin | Delete a ticket and its history |
+| PUT | `/api/tickets/{ticket_id}/assignment` | admin | Assign, reassign or unassign |
+| POST | `/api/tickets/{ticket_id}/claim` | agent | Claim an unassigned ticket |
+| PATCH | `/api/tickets/{ticket_id}/status` | admin, assigned agent | Change the status |
+| GET | `/api/tickets/{ticket_id}/history` | admin, agent | Ticket activity history |
+
+Ticket listing supports pagination (`skip`, `limit` up to 100), status,
+priority, category and text-search filters, and, for staff, the
+`assigned_to` filter (`me`, `none` or a user ID). Every list response has an
+`X-Total-Count` header with the number of matching tickets. Details are in
+[Ticket Assignment and Agent Workflow](#ticket-assignment-and-agent-workflow).
+
+### Analytics (admin and agent)
+
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/api/tickets` | Create a ticket with AI prediction |
-| GET | `/api/tickets` | List and filter tickets |
-| GET | `/api/tickets/{ticket_id}` | Retrieve a ticket |
-| PATCH | `/api/tickets/{ticket_id}` | Update ticket information |
-| DELETE | `/api/tickets/{ticket_id}` | Delete a ticket |
-
-Ticket listing supports pagination, status, priority, category and text-search filters.
+| GET | `/api/analytics/summary` | Ticket totals by status |
+| GET | `/api/analytics/operations` | Category, prediction and priority distributions and daily trends |
+| GET | `/api/analytics/model-performance` | Saved evaluation of the classification model |
 
 ### Administration (admin only)
 
@@ -356,11 +464,136 @@ Request body:
 
 ```json
 {
-  "category": "PAYMENT"
+  "category": "PAYMENT",
+  "expected_version": 2
 }
 ```
 
-The agent-assigned category is stored independently of the original AI prediction.
+The corrected category is stored independently of the original AI
+prediction. Only an administrator or the agent the ticket is assigned to may
+edit it. `expected_version` is optional on this endpoint; when given, the
+edit is rejected with `409` if the ticket changed in the meantime.
+
+## Ticket Assignment and Agent Workflow
+
+The workflow rules live in `app/services/ticket_workflow.py`; the design
+(transactions, locking, history) is described in
+[docs/architecture.md](docs/architecture.md#15-ticket-assignment-and-agent-workflow).
+
+### Roles
+
+| Capability | Administrator | Agent | Customer |
+|---|---|---|---|
+| Create tickets | Yes | Yes | Yes |
+| See tickets | All | All | Own only |
+| See who a ticket is assigned to | Yes | Yes | No (only whether it is assigned) |
+| Assign, reassign, unassign | Yes | No | No |
+| Claim an unassigned ticket | No | Yes | No |
+| Edit a ticket or change its status | Any ticket | Tickets assigned to them | No |
+| Delete a ticket | Yes | No | No |
+| Read ticket history | Yes | Yes | No |
+
+Only **active** users with the role `agent` can be assigned tickets.
+Administrators manage tickets but are never assignees.
+
+### Assignment and reassignment
+
+```http
+PUT /api/tickets/12/assignment
+Authorization: Bearer <admin-access-token>
+Content-Type: application/json
+
+{"assigned_to_user_id": 7, "expected_version": 3}
+```
+
+- Assigns an unassigned ticket, or reassigns it to another agent.
+- `{"assigned_to_user_id": null, "expected_version": 4}` unassigns it. Both
+  fields are required; `null` must be sent explicitly.
+- Unassigning an **In Progress** ticket returns it to **Open**.
+- Repeating the current assignment changes nothing (`200`, no history, no
+  version change).
+- The assignee must be an active agent, otherwise `422`
+  `{"detail": "Assignee must be an active agent."}`.
+
+### Agent claim
+
+```http
+POST /api/tickets/12/claim
+Authorization: Bearer <agent-access-token>
+Content-Type: application/json
+
+{"expected_version": 3}
+```
+
+An agent may claim a ticket that is **unassigned** and **Open** or **In
+Progress**; it is assigned to them. If another agent claimed it first the
+response is `409 {"detail": "Ticket is already assigned."}`, and a Resolved
+ticket gives `409 {"detail": "Resolved tickets cannot be claimed."}`. The
+frontend never retries a claim automatically; it offers to reload the
+ticket.
+
+### Status transitions
+
+`PATCH /api/tickets/{ticket_id}/status` with `{"status": "...",
+"expected_version": n}`, or a `status` field in a ticket edit:
+
+| From | To | Requires an assignee |
+|---|---|---|
+| Open | In Progress | Yes |
+| Open | Resolved | Yes |
+| In Progress | Open | No |
+| In Progress | Resolved | No |
+| Resolved | In Progress | Yes |
+
+Any other change, including **Resolved to Open**, is rejected with `409`.
+Only an administrator or the assigned agent may change the status.
+
+### Concurrency and versions
+
+Every ticket has a `version`, returned to staff. The assignment, claim and
+status endpoints require `expected_version`, the version the client last
+read. If the ticket changed since, the response is
+`409 {"detail": "The ticket was changed by someone else. Reload and try again."}`
+and nothing is written. Reload the ticket and decide again.
+
+### Ticket history
+
+`GET /api/tickets/{ticket_id}/history` (administrators and agents) returns
+the ticket's events, oldest first:
+
+```json
+[
+  {"id": 1, "ticket_id": 12, "event_type": "created", "actor_user_id": 5,
+   "from_assignee_id": null, "to_assignee_id": null, "from_status": null,
+   "to_status": null, "reason": null, "created_at": "2026-11-24T04:37:42.337090"},
+  {"id": 2, "ticket_id": 12, "event_type": "assigned", "actor_user_id": 1,
+   "from_assignee_id": null, "to_assignee_id": 7, "from_status": null,
+   "to_status": null, "reason": null, "created_at": "2026-11-24T04:40:03.112954"}
+]
+```
+
+Event types: `created`, `assigned` (including claims), `reassigned`,
+`unassigned` and `status_changed`. Events contain user IDs, never names or
+emails. Timestamps are UTC. Tickets created before revision `0003` have no
+history until they next change.
+
+### User deactivation and automatic unassignment
+
+Deactivating an account (`PATCH /api/admin/users/{id}/status` with
+`{"is_active": false}`), or changing an agent's role to `admin` or
+`customer`, unassigns that user's **Open** and **In Progress** tickets in
+the same transaction. In Progress tickets return to Open, and each change
+is recorded in the history with the reason `assignee_deactivated` or
+`assignee_role_changed`. **Resolved** tickets keep their assignee.
+Reactivating the account does not restore assignments.
+
+### Customer privacy
+
+Customers receive a reduced ticket model: `is_assigned` tells them whether
+someone is handling the request, but no assignee ID, name, assignment time
+or version is ever returned. A customer requesting another user's ticket
+receives `404`, the same as for a ticket that does not exist, and the
+`assigned_to` filter and the history endpoint are refused.
 
 ## Installation and Setup
 
@@ -457,11 +690,29 @@ Open the API documentation:
 
 http://127.0.0.1:8000/docs
 
-Authenticate using an agent account configured in your application, then use the protected ticket endpoints.
+Authenticate with an account created as described in
+[Creating the First Administrator](#creating-the-first-administrator), then use
+the protected endpoints. The web frontend is served at
+http://127.0.0.1:8000/ (sign in, then the role-specific dashboard opens).
 
 ## Database Setup and Migrations
 
-The schema is managed with Alembic migrations in `alembic/versions/`.
+The schema is managed with Alembic migrations in `alembic/versions/`:
+
+| Revision | Change |
+|---|---|
+| `0001` | Baseline schema (`users`, `tickets`, `revoked_tokens`) |
+| `0002` | `users.token_version` (session invalidation) |
+| `0003` | Ticket assignment (`assigned_to_user_id`, `assigned_at`), ticket `version`, and the `ticket_events` history table |
+
+The current code requires the database to be at `0003`. Check a database
+with `alembic current`.
+
+**Upgrading an existing database to `0003`:** stop the application, back up
+the database, then run `alembic upgrade head`. Existing users and tickets are
+preserved unchanged; existing tickets start unassigned at version 1 with no
+history. Follow the full procedure, including verification and recovery, in
+[docs/database-migrations.md](docs/database-migrations.md#8-upgrading-an-existing-database-to-0003).
 
 Brand-new database:
 
@@ -739,6 +990,9 @@ Response `200 OK`: the updated user.
   change does not sign the user out.
 - Setting the role the user already has is a no-op: `200`, nothing is
   written and nothing is logged.
+- Changing an **agent** to `admin` or `customer` unassigns their Open and
+  In Progress tickets in the same transaction (see
+  [User deactivation and automatic unassignment](#user-deactivation-and-automatic-unassignment)).
 
 Errors:
 
@@ -772,6 +1026,10 @@ Response `200 OK`: the updated user.
 - Repeating the current status is idempotent: `200`, nothing is written,
   `token_version` is not incremented and nothing is logged.
 - A deactivated account cannot sign in or use existing tokens.
+- A deactivation also unassigns the user's Open and In Progress tickets in
+  the same transaction (In Progress returns to Open; Resolved tickets keep
+  their assignee). Reactivation does not restore them. See
+  [User deactivation and automatic unassignment](#user-deactivation-and-automatic-unassignment).
 
 Errors:
 
@@ -854,40 +1112,60 @@ nothing.
   write lock held, so other writes wait for that brief period.
 - The audit log is a log stream, not a database audit trail (see
   [Audit Logging](#audit-logging)).
+- Ticket workflow changes (assignment, claim, status, edits) take the same
+  SQLite write lock, so they are serialised with each other and with these
+  protected changes; a change that cannot get the lock within the busy
+  timeout (5 seconds) fails with `500` and changes nothing.
 
 ## Audit Logging
 
-Every successful administrative change is recorded through the dedicated
-`resolveai.audit` logger (`app/core/audit_logging.py`), after its transaction
-has committed.
+Every successful administrative change and ticket workflow action is
+recorded through the dedicated `resolveai.audit` logger
+(`app/core/audit_logging.py`), after its transaction has committed.
 
 ### What is logged
+
+Administrative actions (`admin_action` records; every record also contains
+`actor_id` and `target_user_id`):
 
 | Action | Logged when | Extra fields |
 |---|---|---|
 | `user.create` | An account is created | `role`, `is_active` |
-| `user.role_change` | A role actually changes | `role_before`, `role_after` |
-| `user.deactivate` | An active account is deactivated | `is_active_before`, `is_active_after` |
+| `user.role_change` | A role actually changes | `role_before`, `role_after`, `unassigned_tickets` |
+| `user.deactivate` | An active account is deactivated | `is_active_before`, `is_active_after`, `unassigned_tickets` |
 | `user.activate` | A deactivated account is reactivated | `is_active_before`, `is_active_after` |
 
-Every record also contains `actor_id` (the administrator) and
-`target_user_id`. Rejected requests and no-op changes (same role or same
-status) are not logged as actions. A stored role the application does not
-recognise is logged as `unrecognised`.
+`unassigned_tickets` is the number of tickets unassigned by the change.
 
-Records **never** contain passwords, password hashes, JWTs, names, emails or
-request bodies.
+Ticket actions (`ticket_action` records; every record also contains
+`actor_id` and `ticket_id`):
+
+| Action | Logged when | Extra fields |
+|---|---|---|
+| `ticket.assign` | A ticket is assigned, reassigned or unassigned | `event_type`, `previous_assignee_id`, `new_assignee_id` |
+| `ticket.claim` | An agent claims a ticket | `assignee_id` |
+| `ticket.status_change` | A status actually changes (`PATCH` or `/status`) | `status_before`, `status_after` |
+| `ticket.delete` | A ticket (and its history) is deleted | (none) |
+
+Rejected requests and no-op changes (same role, status or assignee) are not
+logged. A value the application does not recognise (for example a legacy
+role) is logged as `unrecognised`. Ticket creation is recorded in the ticket
+history rather than the audit log.
+
+Records **never** contain passwords, password hashes, JWTs, names, emails,
+ticket titles or descriptions, or request bodies.
 
 Default output (one line per action, on standard error):
 
 ```text
 2026-11-23T05:12:16.456Z INFO resolveai.audit: admin_action action=user.create actor_id=1 target_user_id=3 role=agent is_active=True
-2026-11-23T05:12:16.644Z INFO resolveai.audit: admin_action action=user.deactivate actor_id=1 target_user_id=2 is_active_before=True is_active_after=False
+2026-11-23T05:12:16.644Z INFO resolveai.audit: admin_action action=user.deactivate actor_id=1 target_user_id=2 is_active_before=True is_active_after=False unassigned_tickets=2
+2026-11-24T04:40:03.115Z INFO resolveai.audit: ticket_action action=ticket.claim actor_id=7 ticket_id=12 assignee_id=7
 ```
 
 The same fields are attached to each log record as a dictionary,
-`record.admin_action`, for handlers or formatters that build structured
-output themselves.
+`record.admin_action` or `record.ticket_action`, for handlers or formatters
+that build structured output themselves.
 
 ### Default behaviour
 
@@ -1033,7 +1311,21 @@ Execute the complete automated test suite:
 python -m pytest -v
 ```
 
-The current project test suite contains 680 passing tests.
+The current project test suite contains 1,136 passing tests.
+
+Run only the ticket workflow tests (assignment, claim, status transitions,
+history, versioning, privacy and concurrency):
+
+```cmd
+python -m pytest tests/test_ticket_workflow.py tests/test_ticket_workflow_api.py tests/test_ticket_history_api.py tests/test_ticket_models.py tests/test_user_ticket_concurrency.py -v
+```
+
+Run only the migration tests (every revision, upgrade and downgrade,
+including `0003`):
+
+```cmd
+python -m pytest tests/test_migrations.py -v
+```
 
 Run only the admin user-management API tests (endpoints, safeguards,
 concurrency and error handling):
@@ -1049,8 +1341,8 @@ fresh-process scenarios):
 python -m pytest tests/test_audit_logging.py -v
 ```
 
-The admin and audit tests use in-memory or temporary SQLite databases and
-never touch `resolveai.db`. The audit tests start fresh Python interpreters to
+All tests use in-memory or temporary SQLite databases and never touch
+`resolveai.db`. The audit tests start fresh Python interpreters to
 apply real logging configurations, so they take longer than the others.
 As for running the application, `SECRET_KEY` (at least 32 characters) must be
 set, normally in `.env` (see `.env.example`).
@@ -1112,16 +1404,23 @@ Implemented:
 - Human-in-the-loop category correction
 - Role-based access control (`admin`, `agent`, `customer`)
 - Admin user management API with administrator safeguards
-- Audit logging of administrative actions (log stream only)
+- Ticket assignment, reassignment and unassignment; agent claim workflow
+- Status transition rules, optimistic concurrency (ticket versions) and
+  persistent ticket history
+- Automatic unassignment when an agent is deactivated or loses the agent role
+- Audit logging of administrative and ticket workflow actions (log stream only)
+- Web frontend with role-specific dashboards, ticket management and analytics
+- Alembic migrations through revision `0003`
 - Automated API and integration tests
 
 Further development:
-- Frontend dashboard
-- Ticket analytics and reporting
+- Admin user-management page in the web frontend (the API exists)
 - Model monitoring and retraining workflow
 - Evaluation using real-world support-ticket data
-- Concurrency testing of admin changes against a live PostgreSQL server
+- Concurrency testing of admin and ticket workflow changes against a live
+  PostgreSQL server (PostgreSQL is not yet a supported database)
 - A persistent (database-backed) audit trail
+- Continuous integration (GitHub Actions)
 
 ## Author
 

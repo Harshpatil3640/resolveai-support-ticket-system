@@ -59,7 +59,12 @@
                     <span>Tickets</span>
                 </a>
 
-                <a href="/analytics.html" class="nav-item">
+                <!-- Staff only: revealed once the role is confirmed. -->
+                <a
+                    href="/analytics.html"
+                    class="nav-item d-none"
+                    data-visible-roles="admin agent"
+                >
                     <span>Analytics</span>
                 </a>
 
@@ -293,6 +298,33 @@
                         </div>
 
 
+                        <!-- Assignment filter (staff only: revealed once
+                             the role is confirmed) -->
+                        <div
+                            class="filter-field d-none"
+                            data-visible-roles="admin agent"
+                        >
+
+                            <label for="assignmentFilter">
+                                Assignment
+                            </label>
+
+                            <select
+                                class="form-select"
+                                id="assignmentFilter"
+                            >
+
+                                <option value="">All Tickets</option>
+
+                                <option value="me">Assigned to Me</option>
+
+                                <option value="none">Unassigned</option>
+
+                            </select>
+
+                        </div>
+
+
                     </div>
 
 
@@ -354,6 +386,8 @@
 
                                     <th>Status</th>
 
+                                    <th>Assigned</th>
+
                                     <th>Created</th>
 
                                     <th>Action</th>
@@ -367,7 +401,7 @@
 
                                 <tr>
 
-                                    <td colspan="7" class="empty-state">
+                                    <td colspan="8" class="empty-state">
                                         Loading support tickets...
                                     </td>
 
@@ -428,6 +462,9 @@
         crossorigin="anonymous"
     ></script>
 
+
+    <!-- Shared utilities (must load before page scripts) -->
+    <script src="./js/common.js" defer></script>
 
     <!-- Tickets JavaScript -->
     <script src="./js/tickets.js" defer></script>

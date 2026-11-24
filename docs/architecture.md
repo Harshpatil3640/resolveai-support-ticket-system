@@ -1,8 +1,13 @@
 # ResolveAI — System Architecture
 
-**Version:** 1.0
-**Status:** Initial architecture
+**Version:** 1.1
+**Status:** Implemented through Phase 7 (ticket assignment and agent workflow)
 **Architecture style:** Modular monolith
+
+Sections 1 to 13 describe the overall system; section 14 covers admin user
+management and section 15 the ticket assignment and agent workflow. Where
+this document and the source code disagree, the source code is
+authoritative.
 
 ## 1. Overview
 
@@ -18,12 +23,15 @@ The first version will run locally on Windows and use SQLite. No paid AI API or 
 flowchart TD
     USER["Support Agent"]
     ADMINUSER["Administrator"]
-    FRONTEND["Browser Frontend<br/>HTML, CSS, JavaScript"]
+    CUSTOMER["Customer"]
+    FRONTEND["Browser Frontend<br/>HTML, CSS, JavaScript<br/>shared common.js"]
     API["FastAPI Application"]
     AUTH["Authentication Service"]
     TICKETS["Ticket Service"]
+    WORKFLOW["Ticket Workflow Service<br/>assignment, claim, status, history"]
     ANALYTICS["Analytics Service"]
     USERADMIN["User Administration Service"]
+    LOCKING["Shared Locking<br/>app.db.locking,<br/>app.services.user_locking"]
     AUDIT["Audit Log<br/>resolveai.audit logger"]
     PREDICT["ML Prediction Service"]
     DATAACCESS["Database Access Layer<br/>SQLAlchemy"]
@@ -35,15 +43,23 @@ flowchart TD
     GITHUB["GitHub Actions"]
 
     USER --> FRONTEND
+    ADMINUSER --> FRONTEND
+    CUSTOMER --> FRONTEND
     FRONTEND <-->|"HTTP and JSON"| API
     ADMINUSER -->|"HTTP and JSON<br/>/api/admin"| API
     API --> AUTH
     API --> TICKETS
+    API --> WORKFLOW
     API --> ANALYTICS
     API --> USERADMIN
     API -->|"after commit"| AUDIT
     TICKETS --> PREDICT
+    TICKETS --> WORKFLOW
     TICKETS --> DATAACCESS
+    WORKFLOW --> LOCKING
+    USERADMIN --> LOCKING
+    USERADMIN -->|"deactivation and role change<br/>unassign tickets"| WORKFLOW
+    WORKFLOW --> DATAACCESS
     AUTH --> DATAACCESS
     ANALYTICS --> DATAACCESS
     USERADMIN --> DATAACCESS
@@ -52,7 +68,7 @@ flowchart TD
     DATA --> TRAIN
     TRAIN --> MODEL
     TRAIN --> METRICS
-    GITHUB -.->|"Run automated tests"| API
+    GITHUB -.->|"Planned: run automated tests"| API
 ```
 
 The browser will access the frontend and REST API through the FastAPI application. This same-origin arrangement keeps the initial local setup straightforward.
@@ -81,17 +97,19 @@ The ML training workflow will run separately from the web application's normal s
 
 Location: `frontend/`
 
-The frontend will provide:
+The frontend is plain HTML, CSS and JavaScript with Bootstrap 5.3.8 from a
+CDN, served by FastAPI from `frontend/` (no build step). It provides:
 
-- Login screen
-- Ticket dashboard
-- Ticket creation form
-- Ticket list with search and filters
-- Ticket detail and edit view
-- ML prediction and confidence display
-- Model evaluation summary
+- Login screen (`index.html`)
+- Role-specific dashboards (`dashboard.html`): administrator, agent
+  workload and customer self-service views, with ticket creation
+- Ticket list with search, filters, assignment filter and pagination, and a
+  ticket details modal with editing, assignment, claiming and the activity
+  timeline (`tickets.html`)
+- Operations analytics and model evaluation, staff only (`analytics.html`)
 
-JavaScript will call the backend using HTTP requests and process JSON responses.
+All pages share `js/common.js` for authentication, requests and roles; see
+[section 15.10](#1510-frontend-shared-utilities-and-role-aware-dashboards).
 
 ### 4.2 API layer
 
@@ -99,13 +117,15 @@ Location: `app/api/routes/`
 
 The API layer will receive HTTP requests, validate input, invoke the appropriate service and return structured responses.
 
-Planned API groups:
+API groups:
 
-- Authentication
-- Tickets
-- Analytics
-- Administration: user management, admin only (implemented in `app/api/routes/admin.py`; see [section 14](#14-admin-user-management))
-- ML predictions and evaluation metrics
+- Authentication (`auth.py`)
+- Tickets, including assignment, claiming, status changes and history
+  (`tickets.py`; see [section 15](#15-ticket-assignment-and-agent-workflow))
+- Analytics: summary, operations and model performance, staff only
+  (`analytics.py`)
+- Administration: user management, admin only (`admin.py`; see
+  [section 14](#14-admin-user-management))
 
 Interactive API documentation will be available through FastAPI's development documentation page.
 
@@ -115,13 +135,18 @@ Location: `app/services/`
 
 The service layer will contain application rules rather than putting all logic inside API routes.
 
-Planned services:
+Services:
 
-- Authentication and user access
-- Ticket creation and updates
-- Ticket search and filtering
-- Dashboard aggregation
-- User administration: account creation, listing, role and status changes (`app/services/user_service.py`)
+- Authentication and user access (`auth_service.py`)
+- Ticket creation, search, filtering, counting and deletion
+  (`ticket_service.py`)
+- Ticket workflow: assignment, claiming, status changes, editing and
+  history (`ticket_workflow.py`)
+- Dashboard and analytics aggregation (`analytics_service.py`)
+- User administration: account creation, listing, role and status changes
+  (`user_service.py`)
+- Shared administrator row locking (`user_locking.py`), used by user
+  administration and the ticket workflow
 
 ### 4.4 Database layer
 
@@ -194,13 +219,38 @@ The `tickets` table will contain:
 - `category`: Final category, which may be empty until reviewed
 - `priority`: Low, Medium or High
 - `status`: Open, In Progress or Resolved
-- `created_by_user_id`: Foreign key referencing `users.id`
+- `created_by_user_id`: Foreign key referencing `users.id` (the creator)
 - `created_at`: Ticket creation timestamp
 - `updated_at`: Last update timestamp
+- `assigned_to_user_id`: Nullable foreign key referencing `users.id` (the
+  assigned agent; `NULL` while unassigned), indexed
+- `assigned_at`: When the current assignment was made; `NULL` while
+  unassigned
+- `version`: Optimistic-concurrency counter, starting at `1`
 
 The original prediction and final category must remain separate so human corrections do not erase the model's original output.
 
 The application must handle tickets that have not yet received a valid prediction or final category.
+
+### 6.3 Ticket events
+
+The `ticket_events` table (revision `0003`) is the persistent activity
+history of each ticket:
+
+- `id`: Primary key
+- `ticket_id`: Foreign key referencing `tickets.id`, `ON DELETE CASCADE`
+- `event_type`: `created`, `assigned`, `reassigned`, `unassigned` or
+  `status_changed`
+- `actor_user_id`: Foreign key referencing `users.id` (who made the change)
+- `from_assignee_id`, `to_assignee_id`: Nullable foreign keys referencing
+  `users.id`
+- `from_status`, `to_status`: Nullable; one of the three ticket statuses
+- `reason`: Nullable; `assignee_deactivated` or `assignee_role_changed`
+- `created_at`: Event timestamp (UTC)
+
+CHECK constraints restrict every enumerated column to these values. Events
+hold only IDs, fixed values and timestamps, never names, emails or ticket
+text. See [section 15.3](#153-ticket-history-ticketevent).
 
 ## 7. API contract
 
@@ -213,19 +263,29 @@ The application must handle tickets that have not yet received a valid predictio
 | POST | `/api/tickets` | Create a ticket |
 | GET | `/api/tickets` | List and filter tickets |
 | GET | `/api/tickets/{id}` | Retrieve a ticket |
-| PATCH | `/api/tickets/{id}` | Update ticket fields |
-| GET | `/api/analytics/summary` | Retrieve dashboard statistics |
+| PATCH | `/api/tickets/{id}` | Update ticket fields (admin, or the assigned agent) |
+| DELETE | `/api/tickets/{id}` | Delete a ticket and its history (admin only) |
+| GET | `/api/tickets/{id}/history` | Ticket activity history (admin and agent) |
+| PUT | `/api/tickets/{id}/assignment` | Assign, reassign or unassign (admin only) |
+| POST | `/api/tickets/{id}/claim` | Claim an unassigned ticket (agent only) |
+| PATCH | `/api/tickets/{id}/status` | Change status (admin, or the assigned agent) |
+| GET | `/api/analytics/summary` | Ticket statistics (admin and agent) |
+| GET | `/api/analytics/operations` | Operational distributions and trends (admin and agent) |
+| GET | `/api/analytics/model-performance` | Saved model evaluation (admin and agent) |
 | GET | `/api/admin/users` | List, search and filter users (admin only) |
 | GET | `/api/admin/users/{user_id}` | Retrieve a user (admin only) |
 | POST | `/api/admin/users` | Create a user (admin only) |
 | PATCH | `/api/admin/users/{user_id}/role` | Change a user's role (admin only) |
 | PATCH | `/api/admin/users/{user_id}/status` | Activate or deactivate a user (admin only) |
-| POST | `/api/ml/predict` | Test an ML prediction |
-| GET | `/api/ml/metrics` | Retrieve the saved evaluation report |
 
-All protected endpoints must enforce authentication and appropriate access permissions.
+All protected endpoints enforce authentication and role-based access.
+Ticket creation, listing and retrieval are open to every role; customers
+only see their own tickets.
 
-The final request and response schemas will be specified during implementation. The admin user-management endpoints are implemented; their request, response and error contract is documented in the [README](../README.md#admin-user-management).
+The admin user-management contract is documented in the
+[README](../README.md#admin-user-management); the ticket workflow contract
+in [section 15.6](#156-workflow-api) and the
+[README](../README.md#ticket-assignment-and-agent-workflow).
 
 ## 8. Machine-learning workflow
 
@@ -276,46 +336,51 @@ Automated tests will cover:
 - Analytics calculations
 - Prediction service behaviour
 - Error handling when the model is unavailable
+- Ticket assignment, claiming, status transitions, history and their
+  concurrency (see [section 15.12](#1512-tests))
+- Migrations, including upgrade and downgrade of every revision
 
-The same automated test suite should run locally and through GitHub Actions.
+The suite runs locally with `python -m pytest`. A GitHub Actions workflow
+is planned but not yet configured in the repository (there is no
+`.github/workflows/`).
 
 ## 11. Repository structure
+
+The README's [Project Architecture](../README.md#project-architecture)
+section lists every file. In outline:
 
 ```text
 resolveai-support-ticket-system/
 ├── app/
-│   ├── main.py
+│   ├── main.py                 # FastAPI app, routers, static frontend
 │   ├── api/
-│   │   └── routes/
-│   ├── core/
-│   ├── db/
-│   ├── models/
-│   ├── schemas/
-│   ├── services/
-│   └── ml/
-│       └── predictor.py
-├── frontend/
-│   ├── index.html
-│   ├── tickets.html
-│   ├── ticket-detail.html
+│   │   ├── dependencies.py     # authentication and role dependencies
+│   │   └── routes/             # auth, tickets, analytics, admin
+│   ├── core/                   # config, roles, security, audit logging
+│   ├── db/                     # engine, migrations helpers, locking
+│   ├── models/                 # User, Ticket, TicketEvent, RevokedToken
+│   ├── schemas/                # Pydantic request/response models
+│   ├── services/               # auth, tickets, workflow, users, analytics
+│   ├── scripts/                # create_admin, create_agent, reset password
+│   └── ml/predictor.py
+├── alembic/versions/           # 0001, 0002, 0003
+├── frontend/                   # index, dashboard, tickets, analytics
 │   ├── css/
-│   └── js/
-├── ml/
-│   ├── train.py
-│   └── evaluate.py
+│   └── js/                     # common.js + one script per page
+├── ml/                         # dataset preparation, training, evaluation
 ├── tests/
 ├── docs/
-│   ├── requirements.md
-│   └── architecture.md
-├── .github/
-│   └── workflows/
+│   ├── architecture.md
+│   ├── database-migrations.md
+│   └── requirements.md
 ├── .env.example
-├── .gitignore
+├── alembic.ini
 ├── README.md
 └── requirements.txt
 ```
 
-The directory structure will be introduced progressively. Local datasets, database files, secrets, virtual environments and other generated files will be excluded from Git as appropriate.
+Local datasets, database files, secrets, virtual environments and other
+generated files are excluded from Git.
 
 ## 12. Development and deployment
 
@@ -337,7 +402,8 @@ Before implementation is complete, we must verify:
 - How the trained model and evaluation report will be generated from a fresh clone.
 - The security configuration required for any public deployment.
 - Concurrency of protected admin changes on PostgreSQL. Row locking is implemented but has only been checked by compiling the SQL, not under concurrent load on a live PostgreSQL server (see [section 14.4](#144-postgresql-and-other-databases)).
-- Whether a persistent, database-backed audit trail is required in addition to the audit log stream.
+- Concurrency of the ticket workflow on PostgreSQL, for the same reason (see [section 15.11](#1511-sqlite-locking-strategy-and-postgresql-limitations)).
+- Whether a persistent, database-backed audit trail is required in addition to the audit log stream. (Ticket history is persistent; administrative and ticket audit records are a log stream only.)
 
 ## 14. Admin user management
 
@@ -474,11 +540,17 @@ by a lookup before the insert on any database.
 
 ### 14.6 Audit logging
 
-`app/core/audit_logging.py` provides the dedicated `resolveai.audit` logger.
+`app/core/audit_logging.py` provides the dedicated `resolveai.audit` logger
+and the fixed-field record helpers (`log_admin_action` and, for tickets, the
+helpers described in [section 15.9](#159-ticket-audit-logging)).
+`log_admin_action` remains importable from `app.api.routes.admin`.
 The route module calls `log_admin_action` only after the change has committed,
 and only when something actually changed. Records contain the action
 (`user.create`, `user.role_change`, `user.activate`, `user.deactivate`),
 `actor_id`, `target_user_id` and the safe before/after role or status values.
+Since Phase 7, `user.deactivate` and `user.role_change` also carry
+`unassigned_tickets`, the number of tickets unassigned by the change
+(section 15.7).
 They never contain passwords, hashes, JWTs, names, emails or request bodies.
 
 `configure_audit_logging()` runs when `app.main` is imported, at every
@@ -515,3 +587,299 @@ Records are emitted after the commit and are not stored in the database.
   thread safety, operator handlers, levels and propagation, and real
   `dictConfig` configurations applied in fresh interpreters before and after
   import.
+
+## 15. Ticket assignment and agent workflow
+
+Phase 7 adds ticket ownership by agents, an agent claim workflow, status
+transition rules, a persistent ticket history and role-aware frontend
+pages. The rules and transactions live in
+`app/services/ticket_workflow.py`; the HTTP contract in
+`app/api/routes/tickets.py`; the schema in revision `0003`
+([database-migrations.md](database-migrations.md#8-upgrading-an-existing-database-to-0003)).
+
+### 15.1 Creator and assignee
+
+A ticket references `users` twice:
+
+| Column | Relationship | Meaning |
+|---|---|---|
+| `created_by_user_id` | `Ticket.creator` / `User.tickets` | Who created the ticket. Never changes. Scopes customer access. |
+| `assigned_to_user_id` | `Ticket.assignee` / `User.assigned_tickets` | The agent currently responsible; `NULL` while unassigned. `assigned_at` records when. |
+
+Only users whose stored role is exactly `agent` and who are active can be
+assignees (`ASSIGNABLE_ROLES`). Administrators manage tickets but are never
+assignees. The database enforces only the foreign key; the role and
+activity rules are enforced by the workflow service, inside its
+transaction.
+
+### 15.2 Versioning and optimistic concurrency
+
+`tickets.version` is SQLAlchemy's `version_id_col`. Every ORM `UPDATE` or
+`DELETE` of a ticket includes `WHERE version = <loaded version>` and
+increments it, so two writers cannot silently overwrite each other: the
+stale one fails with `StaleDataError`.
+
+Two layers use it:
+
+1. **Explicit check.** The assignment, claim and status endpoints require
+   `expected_version` (a strict JSON integer); `PATCH /api/tickets/{id}`
+   accepts it optionally. Inside the locked transaction the service
+   compares it with the stored version and raises
+   `TicketVersionConflictError` if they differ. The frontend always sends
+   the version it last read.
+2. **ORM check.** A stale write that slips past (for example a delete
+   racing a change) raises `StaleDataError`.
+
+The ticket router (`TicketRoute`) maps both to `409` with
+`"The ticket was changed by someone else. Reload and try again."`; nothing
+is written. A no-op (the same assignee or status) writes nothing and does
+not change the version.
+
+### 15.3 Ticket history (TicketEvent)
+
+`app/models/ticket_event.py` (table in [section 6.3](#63-ticket-events))
+records one row per real change, in the **same transaction** as the change,
+so a change and its history are committed or rolled back together.
+
+| Event | Written by | Fields |
+|---|---|---|
+| `created` | Ticket creation (`ticket_service.create_ticket`) | actor = creator |
+| `assigned` | Assignment of an unassigned ticket, or a claim (actor = assignee) | `to_assignee_id` |
+| `reassigned` | Assignment from one agent to another | `from_assignee_id`, `to_assignee_id` |
+| `unassigned` | Unassignment by an administrator, or automatically (section 15.7, with `reason`) | `from_assignee_id`; `from_status`/`to_status` when "In Progress" returned to "Open" |
+| `status_changed` | A real status change through `PATCH` or `/status` | `from_status`, `to_status` |
+
+`record_ticket_event` validates every value against the approved sets
+before adding the row, never commits, and never stores names, emails or
+ticket text. Deleting a ticket deletes its history (`ON DELETE CASCADE`);
+the `ticket.delete` audit record (section 15.9) then remains. Tickets that
+existed before revision `0003` have no events.
+
+### 15.4 Workflow service and rules
+
+`app/services/ticket_workflow.py` owns every ticket change except creation
+and deletion:
+
+| Operation | Who | Rules |
+|---|---|---|
+| `assign_ticket` | Active administrator | Assign, reassign or unassign (`None`). The assignee must be an active `agent`. Unassigning an "In Progress" ticket returns it to "Open". |
+| `claim_ticket` | Active agent | The ticket must be unassigned and "Open" or "In Progress"; it is assigned to the caller. Resolved tickets cannot be claimed. |
+| `change_ticket_status` | Active administrator, or the assigned agent | Follows `STATUS_TRANSITIONS`. |
+| `edit_ticket` | Active administrator, or the assigned agent | Title, description, requester name, category, priority and status (`EDITABLE_FIELDS`); a status change follows the same rules. Assignment, version, creator and AI fields cannot be edited. |
+
+Permitted status transitions (`STATUS_TRANSITIONS`):
+
+| From | To | Requires an assignee |
+|---|---|---|
+| Open | In Progress | Yes |
+| Open | Resolved | Yes |
+| In Progress | Open | No |
+| In Progress | Resolved | No |
+| Resolved | In Progress | Yes |
+
+Anything else, including Resolved to Open, is rejected. Repeating the
+current status is a no-op. `can_manage_ticket` decides management rights:
+active administrators manage every ticket, active agents only tickets
+assigned to them, customers none.
+
+Each operation follows the same pattern (`_run_change`): take the lock and
+read everything inside it (section 15.5), re-validate the actor, check the
+ticket, the version and the rule, write the change and its event, and
+commit. On **any** failure it rolls back and re-raises the original error;
+a failed rollback is attached as a secondary failure. Errors carry fixed
+messages only.
+
+The `*_with_result` variants return what changed, captured before the
+commit, so the API writes its audit record without reading the database
+again.
+
+### 15.5 Shared database locking
+
+Two modules, shared by user administration and the ticket workflow:
+
+- `app/db/locking.py`: `begin_serialised_change(db)` starts the write
+  transaction. On SQLite it issues `BEGIN IMMEDIATE` before anything is
+  read; on other databases it does nothing and the following reads take
+  row locks. It refuses a session that has already written
+  (`TransactionAlreadyStartedError`, a programming error). It never
+  commits or rolls back.
+- `app/services/user_locking.py`: `lock_active_administrator_ids(db)`
+  reads (and, where supported, locks with `FOR UPDATE`) the active
+  administrator rows in `id` order.
+
+Every protected change locks rows in **one global order**:
+
+1. the active administrator rows, ascending `id` (user administration and
+   ticket assignment);
+2. the other user row involved (target, assignee or actor);
+3. ticket rows, ascending `id`.
+
+On databases with row locks this order prevents deadlocks between user
+administration and ticket changes. Every locked read uses
+`populate_existing`, so values loaded earlier in the request (for example
+during authorisation) are replaced by the locked ones.
+
+### 15.6 Workflow API
+
+| Method | Endpoint | Role | Body |
+|---|---|---|---|
+| PUT | `/api/tickets/{id}/assignment` | admin | `{"assigned_to_user_id": <agent id or null>, "expected_version": <int>}`; both required, `null` unassigns |
+| POST | `/api/tickets/{id}/claim` | agent | `{"expected_version": <int>}` |
+| PATCH | `/api/tickets/{id}/status` | admin, agent | `{"status": "...", "expected_version": <int>}` |
+| PATCH | `/api/tickets/{id}` | admin, agent | changed fields, optional `expected_version` |
+| GET | `/api/tickets/{id}/history` | admin, agent | |
+
+Each returns the staff view of the ticket (`StaffTicketRead`), the history
+endpoint a list of `TicketEventRead`. Request bodies forbid extra fields.
+Role checks run before body validation (`403`, never `422`, for the wrong
+role).
+
+| Status | Meaning |
+|---|---|
+| `403` | Wrong role, the actor lost access before the change, or an agent acting on a ticket that is not theirs |
+| `404` | Ticket not found |
+| `409` | Version conflict; `Ticket is already assigned.`; `Resolved tickets cannot be claimed.`; a forbidden status transition or one that needs an assignee |
+| `422` | Invalid body; `Assignee must be an active agent.` |
+| `500` | Unexpected error (fixed `Internal server error.`) |
+
+### 15.7 User deactivation and role changes unassign tickets
+
+When an account is deactivated (`set_user_active_status`), or an agent's
+role changes to one that cannot hold tickets (`change_user_role`),
+`unassign_open_tickets_for_user` runs **inside the same serialised
+transaction** as the user change:
+
+- every "Open" ticket assigned to the user is unassigned and stays "Open";
+- every "In Progress" ticket is unassigned and returns to "Open";
+- "Resolved" tickets keep their assignee;
+- each changed ticket gets one `unassigned` event with the reason
+  (`assignee_deactivated` or `assignee_role_changed`) and its version is
+  incremented.
+
+The user change, the ticket changes, their events and (for status
+changes) the `token_version` increment are committed together or not at
+all. Ticket rows are locked after the user rows, following the global
+order. Reactivation does not restore earlier assignments. The admin audit
+record carries the number of unassigned tickets.
+
+### 15.8 Agent workload and customer privacy
+
+`GET /api/tickets` supports, for staff only, `assigned_to=me` (the
+caller's tickets), `assigned_to=none` (unassigned) or a user ID. A customer
+sending `assigned_to` receives `422`. Every list response carries
+`X-Total-Count`, the number of tickets matching all filters before
+`skip`/`limit`; the list and the count share one definition of the filters
+(`_ticket_conditions`). Tickets are ordered newest first
+(`created_at`, then `id`, descending).
+
+Responses are role-specific:
+
+- **Staff** receive `StaffTicketRead`: `is_assigned`,
+  `assigned_to_user_id`, `assignee` (`id` and `name` only), `assigned_at`
+  and `version`.
+- **Customers** receive `CustomerTicketRead`: whether the ticket is
+  assigned (`is_assigned`), never who. Customers only list and retrieve
+  tickets they created; another user's ticket gives the same `404` as a
+  missing one. They cannot read history, assign, claim, edit, change status
+  or delete.
+- History events contain user IDs only, no names.
+
+### 15.9 Ticket audit logging
+
+After each committed change the ticket routes write a `ticket_action`
+record through `resolveai.audit` (`app/core/audit_logging.py`):
+
+| Action | When | Fields |
+|---|---|---|
+| `ticket.assign` | A real assignment, reassignment or unassignment | `event_type`, `previous_assignee_id`, `new_assignee_id` |
+| `ticket.claim` | A claim | `assignee_id` |
+| `ticket.status_change` | A real status change through `PATCH` or `/status` | `status_before`, `status_after` |
+| `ticket.delete` | A deletion | (the only record left: history is deleted with the ticket) |
+
+Every record has `action`, `actor_id` and `ticket_id`. Values are IDs and
+allowlisted statuses or event types only (anything else is logged as
+`unrecognised`); never titles, descriptions, names, emails or tokens.
+No-ops and rejected requests are not logged. Ticket creation is recorded in
+the ticket history, not the audit log. The "In Progress" to "Open" change
+implied by an unassignment appears in the ticket history but not as a
+separate `ticket.status_change` record.
+
+### 15.10 Frontend shared utilities and role-aware dashboards
+
+`frontend/js/common.js` is loaded before every page script and exposes one
+frozen global, `window.ResolveAI`:
+
+- token storage (`sessionStorage` key `resolveai_access_token`),
+  `authenticatedFetch` (bearer token; `401` clears the session and
+  redirects to the login page; `403` is returned to the caller and never
+  logs out), `safeFetch` (readable network errors) and `apiRequest`;
+- safe error parsing (`checkApiResponse`, `getApiErrorMessage`): only the
+  API's `detail` text, capped in length, never echoed input;
+- `loadCurrentUser()`: one `/api/auth/me` request per page load, shared by
+  every caller;
+- role helpers (`isAdmin`, `isAgent`, `isCustomer`, `isStaff`) and
+  `applyRoleVisibility`: elements marked `data-visible-roles` start hidden
+  and are shown only once the role is confirmed, so nothing privileged
+  appears if the profile cannot be loaded;
+- `logout` and `bindLogoutButton`.
+
+Pages render every server value with `textContent` or DOM construction.
+
+- **Dashboard** (`dashboard.js`). Administrator: the global statistics
+  (`/api/analytics/summary`), an Unassigned card, quick links and the five
+  newest tickets with their assignee. Agent: My Open, My In Progress and My
+  Assigned (all statuses) counts, the unassigned queue and the tickets most
+  recently assigned to them. Customer: totals per status, recent requests
+  and self-service ticket creation; no staff endpoints are called. Counts
+  use `limit=1` and read `X-Total-Count`. Each section has its own loading,
+  empty, error and Retry states.
+- **Tickets** (`tickets.js`). Assigned column (agent name for staff, a
+  neutral label for customers), assignment filter (administrators: All /
+  Unassigned; agents: All / Assigned to Me / Unassigned; customers: none),
+  pagination from `X-Total-Count`, and a details modal whose controls are
+  removed for roles that may not use them: assignment (administrator),
+  claim (agent, eligible tickets), edit (administrator, or the assigned
+  agent), delete (administrator) and the activity timeline (staff). Edits
+  send only changed fields with `expected_version`; a `409` keeps the
+  form's values and offers **Reload Ticket**, never retrying automatically.
+  The page accepts `?status=`, `?assigned_to=` and `?ticket=` for links
+  from the dashboard, applied only when the role can use them.
+
+The UI only offers permitted actions; the API remains the authority for
+every permission.
+
+### 15.11 SQLite locking strategy and PostgreSQL limitations
+
+On SQLite, every workflow change starts with `BEGIN IMMEDIATE`, so it holds
+the single database write lock from its first read to its commit. Changes
+are therefore fully serialised with each other and with protected user
+administration: no two can interleave their reads and writes. A waiting
+change blocks up to the connection's busy timeout (the Python `sqlite3`
+default of 5 seconds; the application does not change it) and then fails
+with a safe `500`, writing nothing. Ticket creation and deletion are not
+serialised this way; deletion relies on the version check (`409`).
+
+On PostgreSQL and other databases with row locks, no `BEGIN IMMEDIATE` is
+issued; the reads use `SELECT ... FOR UPDATE` in the global order of
+section 15.5. **This has been verified only by compiling the SQL.** The
+workflow has not been run against a live PostgreSQL server, and PostgreSQL
+is not a supported production database. The migrations are also written
+and tested for SQLite only.
+
+### 15.12 Tests
+
+- `tests/test_ticket_workflow.py`: rules, transitions, permissions,
+  events, version conflicts, rollback on failure, and concurrency on a
+  temporary SQLite file.
+- `tests/test_ticket_workflow_api.py`: assignment, claim and status
+  endpoints, filters, `X-Total-Count`, customer privacy and stale writes.
+- `tests/test_ticket_history_api.py`: the history endpoint.
+- `tests/test_ticket_models.py`: relationships, cascade and versioning.
+- `tests/test_user_ticket_concurrency.py`: user administration and ticket
+  changes racing each other on a temporary SQLite file.
+- `tests/test_db_locking.py`: the shared serialised-transaction helper.
+- `tests/test_migrations.py`: revision `0003` upgrade, downgrade, data
+  preservation, constraints, and refusal on unexpected columns.
+
+All tests use in-memory or temporary databases and never touch
+`resolveai.db`.

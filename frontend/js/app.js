@@ -5,6 +5,14 @@
 // RESOLVEAI - LOGIN FUNCTIONALITY
 // =========================================
 
+// Shared request, error and token helpers (common.js).
+const {
+    safeFetch,
+    getApiErrorMessage,
+    readJsonResponse,
+    setAccessToken
+} = window.ResolveAI;
+
 // Select login form elements.
 const loginForm = document.getElementById("loginForm");
 
@@ -73,7 +81,8 @@ loginForm.addEventListener("submit", async function (event) {
     try {
 
         // Send login request to FastAPI.
-        const response = await fetch("/api/auth/login", {
+        // safeFetch reports an unreachable server with a readable message.
+        const response = await safeFetch("/api/auth/login", {
 
             method: "POST",
 
@@ -90,16 +99,6 @@ loginForm.addEventListener("submit", async function (event) {
         });
 
 
-        // Read the API response.
-        let responseData = {};
-
-        try {
-            responseData = await response.json();
-        } catch {
-            throw new Error("Unable to read the server response.");
-        }
-
-
         // Handle unsuccessful authentication.
         if (!response.ok) {
 
@@ -108,23 +107,27 @@ loginForm.addEventListener("submit", async function (event) {
             }
 
             throw new Error(
-                responseData.detail || "Login failed. Please try again."
+                await getApiErrorMessage(
+                    response,
+                    "Login failed. Please try again."
+                )
             );
 
         }
 
 
+        // Read the API response (throws a readable error if invalid).
+        const responseData = await readJsonResponse(response);
+
+
         // Verify that the response contains an access token.
-        if (!responseData.access_token) {
+        if (!responseData || !responseData.access_token) {
             throw new Error("The server did not return an access token.");
         }
 
 
         // Store the token for this browser tab's session.
-        sessionStorage.setItem(
-            "resolveai_access_token",
-            responseData.access_token
-        );
+        setAccessToken(responseData.access_token);
 
 
         // Clear the password field.
