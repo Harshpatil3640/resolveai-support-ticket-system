@@ -54,7 +54,8 @@ from app.db.migrations import (
 from app.db.schema_inspection import compare_schemas, describe_schema
 
 
-HEAD_REVISION = "0003"
+HEAD_REVISION = "0004"
+ASSIGNMENT_REVISION = "0003"
 TOKEN_VERSION_REVISION = "0002"
 
 
@@ -248,6 +249,10 @@ def test_revision_history_is_linear_baseline_to_head() -> None:
     assert script.get_heads() == [HEAD_REVISION]
     assert (
         script.get_revision(HEAD_REVISION).down_revision
+        == ASSIGNMENT_REVISION
+    )
+    assert (
+        script.get_revision(ASSIGNMENT_REVISION).down_revision
         == TOKEN_VERSION_REVISION
     )
     assert (
@@ -272,6 +277,7 @@ def test_upgrade_head_initialises_empty_database(
         "users",
         "tickets",
         "ticket_events",
+        "ticket_messages",
         "revoked_tokens",
     }
     assert _current_revision(database_file) == [HEAD_REVISION]
@@ -288,6 +294,7 @@ def test_migrated_schema_matches_sqlalchemy_models(
         "users",
         "tickets",
         "ticket_events",
+        "ticket_messages",
         "revoked_tokens",
     }
 
@@ -1024,7 +1031,13 @@ def test_reference_schema_is_built_from_migrations_in_a_temporary_database(
     reference = build_reference_schema("heads")
 
     assert not sentinel.exists()
-    assert set(reference) == {"users", "tickets", "ticket_events", "revoked_tokens"}
+    assert set(reference) == {
+        "users",
+        "tickets",
+        "ticket_events",
+        "ticket_messages",
+        "revoked_tokens",
+    }
     assert reference["users"]["columns"]["token_version"] == (
         "INTEGER",
         False,
@@ -1903,3 +1916,348 @@ def test_0003_runs_with_foreign_keys_enforced(database_0002: Path) -> None:
 
     with _connect(database_0002) as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+# ---------------------------------------------------------------------------
+# Revision 0004: ticket_messages conversation table
+# ---------------------------------------------------------------------------
+
+MIGRATION_0004 = (
+    Path(__file__).resolve().parents[1]
+    / "alembic"
+    / "versions"
+    / "0004_ticket_messages.py"
+)
+
+# Phase 7 data at revision 0003, on top of DATA_0002_SQL: an assigned
+# ticket with history, an unassigned one and a resolved one.
+DATA_0003_SQL = [
+    "UPDATE tickets SET assigned_to_user_id = 1, "
+    "assigned_at = '2026-11-23 09:00:00.000000', version = 3 WHERE id = 1",
+    "UPDATE tickets SET version = 2 WHERE id = 3",
+    f"INSERT INTO ticket_events ({TICKET_EVENT_COLUMNS}) VALUES "
+    "(1, 'created', 1, NULL, NULL, NULL, NULL, NULL, "
+    "'2026-11-23 08:00:00.000000')",
+    f"INSERT INTO ticket_events ({TICKET_EVENT_COLUMNS}) VALUES "
+    "(1, 'assigned', 1, NULL, 1, NULL, NULL, NULL, "
+    "'2026-11-23 09:00:00.000000')",
+    f"INSERT INTO ticket_events ({TICKET_EVENT_COLUMNS}) VALUES "
+    "(3, 'unassigned', 2, 1, NULL, 'In Progress', 'Open', "
+    "'assignee_deactivated', '2026-11-23 09:30:00.000000')",
+]
+
+TICKET_MESSAGE_COLUMNS = (
+    "ticket_id, sender_user_id, sender_role, content, created_at"
+)
+
+PHASE_7_TABLES = ("users", "tickets", "ticket_events", "revoked_tokens")
+
+
+def _load_migration_0004():
+    spec = importlib.util.spec_from_file_location("migration_0004", MIGRATION_0004)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    return migration
+
+
+@pytest.fixture
+def database_0003(tmp_path: Path) -> Path:
+    """A genuine revision-0003 database (built by the migrations) with data."""
+
+    path = tmp_path / "at_0003.db"
+    command.upgrade(_config_for(path), ASSIGNMENT_REVISION)
+    _run_sql(path, *DATA_0002_SQL, *DATA_0003_SQL)
+
+    assert _current_revision(path) == [ASSIGNMENT_REVISION]
+
+    return path
+
+
+def _phase_7_rows(path: Path) -> dict[str, list[tuple]]:
+    return {table: _rows(path, table) for table in PHASE_7_TABLES}
+
+
+def _insert_message(connection: sqlite3.Connection, **overrides) -> None:
+    values = {
+        "ticket_id": 1,
+        "sender_user_id": 3,
+        "sender_role": "customer",
+        "content": "Hello, I still need help.",
+        "created_at": "2026-11-25 10:00:00.000000",
+        **overrides,
+    }
+    connection.execute(
+        f"INSERT INTO ticket_messages ({TICKET_MESSAGE_COLUMNS}) VALUES "
+        "(:ticket_id, :sender_user_id, :sender_role, :content, :created_at)",
+        values,
+    )
+
+
+def test_0004_upgrade_preserves_every_phase_7_row(database_0003: Path) -> None:
+    before = _phase_7_rows(database_0003)
+
+    assert before["ticket_events"]  # the fixture really has history
+
+    command.upgrade(_config_for(database_0003), "head")
+
+    assert _current_revision(database_0003) == [HEAD_REVISION]
+    # Users, tickets (assignment and versions included), history and
+    # revoked tokens keep exactly the same rows.
+    assert _phase_7_rows(database_0003) == before
+    assert _rows(database_0003, "ticket_messages") == []
+
+    with _enforcing_connection(database_0003) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_0004_schema_has_foreign_keys_checks_and_index(database_0003: Path) -> None:
+    command.upgrade(_config_for(database_0003), "head")
+
+    assert _foreign_key_list(database_0003, "ticket_messages") == {
+        ("ticket_id", "tickets", "id", "CASCADE"),
+        ("sender_user_id", "users", "id", "NO ACTION"),
+    }
+    messages_sql = _table_sql(database_0003, "ticket_messages")
+
+    for name in (
+        "fk_ticket_messages_ticket_id_tickets",
+        "fk_ticket_messages_sender_user_id_users",
+    ):
+        assert f"CONSTRAINT {name} FOREIGN KEY" in messages_sql
+
+    assert _check_constraint_names(database_0003, "ticket_messages") == {
+        "ck_ticket_messages_sender_role",
+        "ck_ticket_messages_content_not_blank",
+        "ck_ticket_messages_content_length",
+    }
+    assert _index_names(database_0003, "ticket_messages") == {
+        "ix_ticket_messages_ticket_id_id",
+    }
+
+    with _connect(database_0003) as connection:
+        index_columns = [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info(ix_ticket_messages_ticket_id_id)"
+            )
+        ]
+
+    assert index_columns == ["ticket_id", "id"]
+
+    columns = _describe(database_0003)["ticket_messages"]["columns"]
+
+    assert columns["ticket_id"] == ("INTEGER", False, None)
+    assert columns["sender_user_id"] == ("INTEGER", False, None)
+    assert columns["sender_role"] == ("VARCHAR(30)", False, None)
+    assert columns["content"] == ("TEXT", False, None)
+    assert columns["created_at"] == ("DATETIME", False, None)
+
+    # Upgrading an existing database gives exactly the schema a new one gets.
+    assert compare_schemas(
+        build_reference_schema("head"), _describe(database_0003)
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sender_role": "superuser"},
+        {"sender_role": "Admin"},
+        {"sender_role": None},
+        {"content": ""},
+        {"content": "   "},
+        {"content": " \t\r\n "},
+        {"content": "x" * 10_001},
+        {"content": None},
+        {"ticket_id": 99},
+        {"ticket_id": None},
+        {"sender_user_id": 99},
+        {"sender_user_id": None},
+        {"created_at": None},
+    ],
+    ids=[
+        "unknown-role",
+        "role-wrong-case",
+        "null-role",
+        "empty-content",
+        "spaces-only",
+        "mixed-whitespace-only",
+        "content-too-long",
+        "null-content",
+        "missing-ticket",
+        "null-ticket",
+        "missing-sender",
+        "null-sender",
+        "null-created-at",
+    ],
+)
+def test_0004_message_constraints_are_enforced(
+    database_0003: Path,
+    overrides: dict,
+) -> None:
+    command.upgrade(_config_for(database_0003), "head")
+
+    with _enforcing_connection(database_0003) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_message(connection, **overrides)
+
+    assert _rows(database_0003, "ticket_messages") == []
+
+
+def test_0004_valid_messages_are_accepted_and_cascade_with_their_ticket(
+    database_0003: Path,
+) -> None:
+    command.upgrade(_config_for(database_0003), "head")
+
+    with _enforcing_connection(database_0003) as connection:
+        _insert_message(connection)
+        _insert_message(connection, sender_user_id=1, sender_role="agent")
+        _insert_message(connection, sender_user_id=2, sender_role="admin")
+        _insert_message(connection, content="x" * 10_000)
+        _insert_message(connection, ticket_id=2, content="  padded  ")
+        # User 4 is referenced by nothing but a message on ticket 2.
+        connection.execute(
+            "INSERT INTO users (id, name, email, password_hash, role, "
+            "is_active, created_at, token_version) VALUES (4, 'Agent Four', "
+            "'agent4@example.test', 'hash-4', 'agent', 1, "
+            "'2026-11-24 09:00:00.000000', 0)"
+        )
+        _insert_message(
+            connection, ticket_id=2, sender_user_id=4, sender_role="agent"
+        )
+        connection.commit()
+
+        # Deleting a ticket deletes its messages (and only its messages,
+        # together with its events); the senders are kept.
+        connection.execute("DELETE FROM tickets WHERE id = 1")
+        connection.commit()
+
+        remaining = connection.execute(
+            "SELECT ticket_id FROM ticket_messages"
+        ).fetchall()
+        users = connection.execute("SELECT count(*) FROM users").fetchone()
+
+        # A user referenced by a message cannot be deleted (no cascade
+        # from messages to users).
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM users WHERE id = 4")
+
+    assert remaining == [(2,), (2,)]
+    assert users == (4,)
+
+
+def test_0004_downgrade_restores_0003_and_upgrades_again(
+    database_0003: Path,
+) -> None:
+    before = _phase_7_rows(database_0003)
+    config = _config_for(database_0003)
+    reference_0003 = build_reference_schema(ASSIGNMENT_REVISION)
+
+    command.upgrade(config, "head")
+
+    with _enforcing_connection(database_0003) as connection:
+        _insert_message(connection)
+        _insert_message(
+            connection, ticket_id=3, sender_user_id=2, sender_role="admin"
+        )
+        connection.commit()
+
+    command.downgrade(config, ASSIGNMENT_REVISION)
+
+    assert _current_revision(database_0003) == [ASSIGNMENT_REVISION]
+    assert "ticket_messages" not in _table_names(database_0003)
+    assert _phase_7_rows(database_0003) == before
+    assert compare_schemas(reference_0003, _describe(database_0003)) == []
+
+    with _connect(database_0003) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master "
+            "WHERE name = 'ix_ticket_messages_ticket_id_id'"
+        ).fetchone() == (0,)
+
+    # Re-upgrading works and starts with an empty conversation table.
+    command.upgrade(config, "head")
+
+    assert _current_revision(database_0003) == [HEAD_REVISION]
+    assert _phase_7_rows(database_0003) == before
+    assert _rows(database_0003, "ticket_messages") == []
+    assert compare_schemas(
+        build_reference_schema("head"), _describe(database_0003)
+    ) == []
+
+    with _connect(database_0003) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_0004_runs_with_foreign_keys_enforced(database_0003: Path) -> None:
+    """The migration does not rely on env.py turning enforcement off."""
+
+    migration = _load_migration_0004()
+    before = _phase_7_rows(database_0003)
+    engine = create_engine(sqlite_url(database_0003))
+
+    @event.listens_for(engine, "connect")
+    def _enforce(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        with engine.begin() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.upgrade()
+
+        with _enforcing_connection(database_0003) as connection:
+            _insert_message(connection)
+            connection.commit()
+
+        with engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.downgrade()
+    finally:
+        engine.dispose()
+
+    assert _phase_7_rows(database_0003) == before
+    assert "ticket_messages" not in _table_names(database_0003)
+
+    with _connect(database_0003) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_0004_model_check_constraints_match_the_migration() -> None:
+    """The model's named CHECK constraints are the migration's, verbatim.
+
+    Alembic's autogenerate comparison ignores CHECK constraints, so the
+    model and the migration texts are compared directly.
+    """
+
+    from sqlalchemy import CheckConstraint
+
+    from app.models import TicketMessage
+    from app.models.ticket_message import MAX_MESSAGE_LENGTH
+
+    migration = _load_migration_0004()
+    source = MIGRATION_0004.read_text(encoding="utf-8")
+
+    model_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in TicketMessage.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert set(model_checks) == {
+        "ck_ticket_messages_sender_role",
+        "ck_ticket_messages_content_not_blank",
+        "ck_ticket_messages_content_length",
+    }
+    assert migration.MAX_MESSAGE_LENGTH == MAX_MESSAGE_LENGTH
+    assert model_checks["ck_ticket_messages_content_length"] == (
+        f"length(content) <= {migration.MAX_MESSAGE_LENGTH}"
+    )
+
+    for name, text in model_checks.items():
+        if name != "ck_ticket_messages_content_length":
+            assert f'"{text}"' in source

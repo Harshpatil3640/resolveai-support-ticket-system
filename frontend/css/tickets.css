@@ -330,6 +330,270 @@
 
 
 /* =========================================
+   TICKET CONVERSATION
+========================================= */
+
+.ticket-conversation {
+    margin-top: 22px;
+    padding-top: 20px;
+    border-top: 1px solid #edf0f5;
+    min-width: 0;
+}
+
+.conversation-heading p {
+    margin-bottom: 10px;
+}
+
+/* Long conversations scroll here, not in the modal body. */
+.conversation-thread {
+    max-height: 380px;
+    padding: 14px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    border: 1px solid #e9edf3;
+    border-radius: 12px;
+    background: #f5f7fb;
+    overscroll-behavior: contain;
+}
+
+.conversation-thread:focus-visible {
+    outline: 2px solid #4779e8;
+    outline-offset: 2px;
+}
+
+.conversation-older {
+    display: flex;
+    justify-content: center;
+}
+
+.conversation-older .btn {
+    min-height: 34px;
+    margin-bottom: 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #46536a;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.conversation-older .btn:hover:not(:disabled) {
+    border-color: #4779e8;
+    color: #4779e8;
+}
+
+.conversation-state {
+    margin: 4px 0;
+    font-size: 12px;
+    text-align: center;
+}
+
+.conversation-list {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.conversation-list:empty {
+    display: none;
+}
+
+.conversation-message {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    max-width: 85%;
+    min-width: 0;
+}
+
+/* The current user's messages sit on the right. */
+.conversation-message.is-own {
+    flex-direction: row-reverse;
+    align-self: flex-end;
+}
+
+.conversation-avatar {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: #e6edfc;
+    color: #4779e8;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.conversation-message.role-customer .conversation-avatar {
+    background: #e7f6ee;
+    color: #1f8a55;
+}
+
+.conversation-message.role-admin .conversation-avatar {
+    background: #17243a;
+    color: #ffffff;
+}
+
+.conversation-bubble {
+    min-width: 0;
+    padding: 10px 14px;
+    border: 1px solid #e9edf3;
+    border-radius: 4px 14px 14px 14px;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(23, 36, 58, 0.04);
+}
+
+/* A darker shade of the primary blue keeps white text above 4.5:1. */
+.conversation-message.is-own .conversation-bubble {
+    border-color: #3762c4;
+    border-radius: 14px 4px 14px 14px;
+    background: #3762c4;
+    color: #ffffff;
+}
+
+.conversation-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 8px;
+    margin-bottom: 4px;
+}
+
+.conversation-sender {
+    color: #17243a;
+    font-size: 12px;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.conversation-role {
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: #eef2f8;
+    color: #46536a;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.conversation-message.role-agent .conversation-role {
+    background: #e6edfc;
+    color: #3762c4;
+}
+
+.conversation-message.role-admin .conversation-role {
+    background: #17243a;
+    color: #ffffff;
+}
+
+.conversation-message.role-customer .conversation-role {
+    background: #e7f6ee;
+    color: #1f7a4c;
+}
+
+.conversation-time {
+    color: #8491a5;
+    font-size: 11px;
+}
+
+.conversation-message.is-own .conversation-sender,
+.conversation-message.is-own .conversation-time {
+    color: rgba(255, 255, 255, 0.88);
+}
+
+.conversation-message.is-own .conversation-role {
+    background: rgba(255, 255, 255, 0.2);
+    color: #ffffff;
+}
+
+/* Plain text: line breaks kept, long words and URLs wrapped. */
+.conversation-content {
+    margin: 0;
+    color: #2b3548;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.conversation-message.is-own .conversation-content {
+    color: #ffffff;
+}
+
+#conversationAlert:not(.d-none) {
+    margin: 12px 0 0;
+}
+
+.conversation-composer {
+    margin-top: 12px;
+}
+
+.conversation-composer .form-control {
+    min-height: 64px;
+    max-height: 200px;
+    border-color: #e2e8f0;
+    border-radius: 10px;
+    font-size: 13px;
+    resize: vertical;
+}
+
+.conversation-composer .form-control:focus {
+    border-color: #4779e8;
+    box-shadow: 0 0 0 3px rgba(71, 121, 232, 0.12);
+}
+
+.conversation-composer-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    margin-top: 8px;
+}
+
+.conversation-composer-help {
+    flex: 1 1 auto;
+    color: #8491a5;
+    font-size: 11px;
+}
+
+.conversation-char-count {
+    color: #8491a5;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.conversation-char-count.is-over {
+    color: #dc3545;
+    font-weight: 700;
+}
+
+.conversation-composer-footer .btn {
+    min-width: 96px;
+    min-height: 40px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.conversation-readonly {
+    margin: 12px 0 0;
+    padding: 10px 14px;
+    border: 1px dashed #d5dce8;
+    border-radius: 10px;
+    background: #fafbfd;
+    color: #5b6880;
+    font-size: 12px;
+}
+
+
+/* =========================================
    RESPONSIVE - TABLET
 ========================================= */
 
@@ -383,6 +647,30 @@
 
     .pagination-buttons .btn {
         flex: 1;
+    }
+
+    .conversation-thread {
+        max-height: 55vh;
+        padding: 10px;
+    }
+
+    .conversation-message {
+        max-width: 100%;
+    }
+
+    .conversation-avatar {
+        width: 30px;
+        height: 30px;
+        font-size: 11px;
+    }
+
+    .conversation-composer-help {
+        flex-basis: 100%;
+    }
+
+    .conversation-composer-footer .btn {
+        flex: 1 1 auto;
+        min-height: 44px;
     }
 
 }

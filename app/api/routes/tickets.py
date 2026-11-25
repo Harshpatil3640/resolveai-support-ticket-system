@@ -46,9 +46,20 @@ from app.schemas.ticket import (
     TicketClaim,
     TicketCreate,
     TicketEventRead,
+    TicketMessageCreate,
+    TicketMessageRead,
     TicketRead,
     TicketStatusUpdate,
     TicketUpdate,
+)
+from app.services.ticket_message_service import (
+    DEFAULT_PAGE_SIZE as MESSAGE_PAGE_SIZE,
+    MAX_PAGE_SIZE as MAX_MESSAGE_PAGE_SIZE,
+    InvalidTicketMessageError,
+    TicketMessageView,
+    TicketResolvedError,
+    create_ticket_message,
+    list_ticket_messages,
 )
 from app.services.ticket_service import (
     count_tickets,
@@ -125,11 +136,12 @@ def _ticket_http_error(error: Exception) -> HTTPException:
             TicketAlreadyAssignedError,
             TicketNotClaimableError,
             InvalidStatusTransitionError,
+            TicketResolvedError,
         ),
     ):
         return HTTPException(status.HTTP_409_CONFLICT, str(error))
 
-    if isinstance(error, AssigneeNotAssignableError):
+    if isinstance(error, (AssigneeNotAssignableError, InvalidTicketMessageError)):
         return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error))
 
     if isinstance(error, InvalidTicketEventError):
@@ -644,3 +656,104 @@ def change_ticket_status_endpoint(
     _log_status_change(result, actor_id=actor_id, ticket_id=ticket_id)
 
     return _staff_read(result.ticket)
+
+
+# ---------------------------------------------------------------------------
+# Conversation messages
+# ---------------------------------------------------------------------------
+
+MessageCursor = Annotated[
+    int | None,
+    Query(
+        ge=1,
+        le=MAX_DATABASE_INTEGER,
+        description=(
+            "Return only messages older than this message ID (the oldest "
+            "ID already loaded)."
+        ),
+    ),
+]
+
+
+def _message_read(message: TicketMessageView) -> TicketMessageRead:
+    """The response for one message, field by field (no User object)."""
+
+    return TicketMessageRead(
+        id=message.id,
+        ticket_id=message.ticket_id,
+        sender_user_id=message.sender_user_id,
+        sender_name=message.sender_name,
+        sender_role=message.sender_role,
+        content=message.content,
+        created_at=message.created_at,
+    )
+
+
+@router.get(
+    "/{ticket_id}/messages",
+    response_model=list[TicketMessageRead],
+    summary="List a ticket's conversation messages",
+)
+def list_ticket_messages_endpoint(
+    ticket_id: TicketId,
+    response: Response,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_any_role)],
+    limit: Annotated[
+        int,
+        Query(ge=1, le=MAX_MESSAGE_PAGE_SIZE),
+    ] = MESSAGE_PAGE_SIZE,
+    before_id: MessageCursor = None,
+) -> list[TicketMessageRead]:
+    """Return one page of the conversation, newest first.
+
+    Administrators and agents can read every ticket's conversation;
+    customers only their own tickets' (any other ticket returns the same
+    404 as a missing one). Without ``before_id`` the newest ``limit``
+    messages are returned; pass the oldest ID already loaded as
+    ``before_id`` to load older ones. ``X-Total-Count`` holds the number
+    of messages on the ticket.
+    """
+
+    page = list_ticket_messages(
+        db,
+        viewer=current_user,
+        ticket_id=ticket_id,
+        limit=limit,
+        before_id=before_id,
+    )
+
+    response.headers["X-Total-Count"] = str(page.total)
+
+    return [_message_read(message) for message in page.messages]
+
+
+@router.post(
+    "/{ticket_id}/messages",
+    response_model=TicketMessageRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Send a message on a ticket",
+)
+def create_ticket_message_endpoint(
+    ticket_id: TicketId,
+    payload: TicketMessageCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_any_role)],
+) -> TicketMessageRead:
+    """Add a message to an unresolved ticket's conversation.
+
+    The sender and their role are always the authenticated user. Who may
+    write: administrators on any unresolved ticket; agents only on a
+    ticket currently assigned to them (403 otherwise); customers only on
+    their own tickets (404 otherwise). A Resolved ticket returns 409 until
+    it is reopened. The message content is never logged.
+    """
+
+    message = create_ticket_message(
+        db,
+        actor_id=current_user.id,
+        ticket_id=ticket_id,
+        content=payload.content,
+    )
+
+    return _message_read(message)
