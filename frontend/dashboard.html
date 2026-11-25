@@ -60,6 +60,15 @@
                     <span>Analytics</span>
                 </a>
 
+                <!-- Admin only: revealed once the role is confirmed. -->
+                <a
+                    href="/users.html"
+                    class="nav-item d-none"
+                    data-visible-roles="admin"
+                >
+                    <span>Users</span>
+                </a>
+
             </nav>
 
             <div class="sidebar-footer">
@@ -475,6 +484,7 @@
                     <a class="btn btn-light" href="/tickets.html">All Tickets</a>
                     <a class="btn btn-light" href="/tickets.html?assigned_to=none">Unassigned Tickets</a>
                     <a class="btn btn-light" href="/analytics.html">Analytics</a>
+                    <a class="btn btn-light" href="/users.html">User Management</a>
                 </nav>
 
                 <nav
