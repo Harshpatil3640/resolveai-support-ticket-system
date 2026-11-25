@@ -26,8 +26,9 @@ migrate on startup, and scripts such as `app.scripts.create_agent` only
 | `0001` | **Baseline.** The schema exactly as it existed before Alembic (`users`, `tickets`, `revoked_tokens` with their indexes and constraints). |
 | `0002` | Adds `users.token_version` (`INTEGER NOT NULL DEFAULT 0`). Existing users receive `0`. |
 | `0003` | **Ticket assignment and history.** Adds `tickets.assigned_to_user_id` (nullable, foreign key to `users.id`, indexed), `tickets.assigned_at` (nullable) and `tickets.version` (`INTEGER NOT NULL DEFAULT 1`, the optimistic-concurrency counter), and creates the `ticket_events` history table. Existing tickets keep every value, start unassigned at version `1` and receive no history. See [section 8](#8-upgrading-an-existing-database-to-0003). |
+| `0004` | **Ticket conversations.** Creates the `ticket_messages` table (`id`, `ticket_id`, `sender_user_id`, `sender_role`, `content`, `created_at`). `ticket_id` references `tickets.id` with `ON DELETE CASCADE`; `sender_user_id` references `users.id`. Named CHECK constraints allow only the roles `admin`, `agent` and `customer` and reject blank content or content over 10,000 characters. Index `ix_ticket_messages_ticket_id_id` on `(ticket_id, id)`. No existing table is altered: every user, ticket and history row is left as it is. Downgrading to `0003` drops the index and the table (and every message). Rehearse on a copy first, as in [section 8](#8-upgrading-an-existing-database-to-0003). |
 
-`alembic heads` reports `0003`. A database is only at `0003` once
+`alembic heads` reports `0004`. A database is only at `0004` once
 `alembic upgrade head` has been run against it; check with `alembic current`.
 
 ## 1. Install dependencies

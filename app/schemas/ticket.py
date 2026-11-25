@@ -2,7 +2,15 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
+
+from app.models.ticket_message import MAX_MESSAGE_LENGTH
 
 
 Priority = Literal["Low", "Medium", "High"]
@@ -231,3 +239,57 @@ class TicketStatusUpdate(_TicketActionRequest):
     status: Status
 
     expected_version: ExpectedVersion
+
+
+# ---------------------------------------------------------------------------
+# Conversation messages
+# ---------------------------------------------------------------------------
+
+# A message body: a JSON string only (numbers, booleans and objects are
+# rejected, never coerced), stripped of leading and trailing whitespace,
+# then 1 to 10,000 characters. Whitespace-only text strips to "" and is
+# rejected.
+MessageContent = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_MESSAGE_LENGTH,
+    ),
+]
+
+
+class TicketMessageCreate(BaseModel):
+    """A new message on a ticket.
+
+    Only ``content``: the sender, their role, the ticket and the time all
+    come from the server (the authenticated user and the URL), so any
+    other field (such as ``sender_user_id``) is rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: MessageContent
+
+
+class TicketMessageRead(BaseModel):
+    """A conversation message as every participant sees it.
+
+    The sender's ID, display name and role snapshot only: never their
+    email, password hash or token information.
+    """
+
+    id: int
+
+    ticket_id: int
+
+    sender_user_id: int
+
+    sender_name: str
+
+    sender_role: str
+
+    content: str
+
+    created_at: datetime

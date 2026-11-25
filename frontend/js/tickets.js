@@ -6,7 +6,8 @@
 // =========================================
 //
 // Role-aware ticket list, details, editing, assignment (admin),
-// claiming (agent) and activity history (staff).
+// claiming (agent), activity history (staff) and the ticket
+// conversation (every participant).
 //
 // The UI only offers actions the current role may perform; the API
 // remains the authority and enforces every permission.
@@ -22,7 +23,10 @@ const {
     bindLogoutButton,
     isAdmin,
     isAgent,
+    isCustomer,
     isStaff,
+    isKnownRole,
+    formatRole,
     isAuthenticationError
 } = window.ResolveAI;
 
@@ -70,6 +74,11 @@ const UNASSIGNMENT_REASONS = Object.freeze({
     assignee_role_changed: "the agent's role was changed"
 });
 
+// Conversation: the API's page size and message limit. The API
+// validates both; these only guide the interface.
+const MESSAGE_PAGE_SIZE = 50;
+const MAX_MESSAGE_LENGTH = 10000;
+
 
 // =========================================
 // PAGE STATE
@@ -95,6 +104,25 @@ let agentRequestId = 0;
 
 // Active agents available for assignment (admin only).
 let assignableAgents = [];
+
+// Conversation shown in the details modal. `messages` is kept oldest
+// first and holds each message ID once. `requestId` guards against
+// responses for a ticket that is no longer shown.
+const conversation = {
+    ticketId: null,
+    messages: [],
+    messageIds: new Set(),
+    total: 0,
+    hasOlder: false,
+    loadingOlder: false,
+    requestId: 0
+};
+
+// Ticket ID whose message is being sent (one send at a time), or null.
+let sendingTicketId = null;
+
+// Unsent drafts per ticket ID, kept while the page is open.
+const conversationDrafts = new Map();
 
 
 // =========================================
@@ -749,6 +777,115 @@ function getTicketDetailsModal() {
                         </section>
 
 
+                        <!-- EVERY PARTICIPANT: CONVERSATION -->
+                        <section
+                            class="ticket-conversation"
+                            id="ticketConversationSection"
+                            aria-labelledby="ticketConversationHeading"
+                        >
+
+                            <div class="ticket-panel-heading conversation-heading">
+                                <h6 id="ticketConversationHeading">
+                                    Conversation
+                                </h6>
+                                <p id="conversationSummary"></p>
+                            </div>
+
+                            <div
+                                class="conversation-thread"
+                                id="conversationThread"
+                                role="log"
+                                aria-labelledby="ticketConversationHeading"
+                                tabindex="0"
+                            >
+
+                                <div class="conversation-older">
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-light d-none"
+                                        id="loadOlderMessagesButton"
+                                    >
+                                        Load older messages
+                                    </button>
+                                </div>
+
+                                <p
+                                    class="conversation-state"
+                                    id="conversationState"
+                                    aria-live="polite"
+                                ></p>
+
+                                <ol
+                                    class="conversation-list"
+                                    id="conversationList"
+                                ></ol>
+
+                            </div>
+
+                            <div
+                                id="conversationAlert"
+                                class="alert d-none"
+                                role="alert"
+                                aria-live="polite"
+                            ></div>
+
+                            <form
+                                class="conversation-composer"
+                                id="conversationComposer"
+                                novalidate
+                            >
+
+                                <label
+                                    for="conversationInput"
+                                    class="visually-hidden"
+                                >
+                                    Message
+                                </label>
+
+                                <textarea
+                                    class="form-control"
+                                    id="conversationInput"
+                                    rows="2"
+                                    placeholder="Write a message..."
+                                    aria-describedby="conversationComposerHelp"
+                                ></textarea>
+
+                                <div class="conversation-composer-footer">
+
+                                    <span
+                                        class="conversation-composer-help"
+                                        id="conversationComposerHelp"
+                                    >
+                                        Enter to send, Shift+Enter for a new line.
+                                    </span>
+
+                                    <span
+                                        class="conversation-char-count"
+                                        id="conversationCharCount"
+                                        aria-live="polite"
+                                    ></span>
+
+                                    <button
+                                        type="submit"
+                                        class="btn btn-primary"
+                                        id="sendMessageButton"
+                                    >
+                                        Send
+                                    </button>
+
+                                </div>
+
+                            </form>
+
+                            <p
+                                class="conversation-readonly d-none"
+                                id="conversationReadOnlyNotice"
+                                role="status"
+                            ></p>
+
+                        </section>
+
+
                         <!-- STAFF: ACTIVITY HISTORY -->
                         <section
                             class="ticket-activity"
@@ -1057,6 +1194,38 @@ function getTicketDetailsModal() {
         saveTicketChanges
     );
 
+    // Conversation (every role).
+    modal.querySelector("#conversationComposer").addEventListener(
+        "submit",
+        event => {
+            event.preventDefault();
+            sendConversationMessage();
+        }
+    );
+
+    modal.querySelector("#conversationInput").addEventListener(
+        "keydown",
+        handleComposerKeydown
+    );
+
+    modal.querySelector("#conversationInput").addEventListener(
+        "input",
+        updateComposerCharacterCount
+    );
+
+    modal.querySelector("#loadOlderMessagesButton").addEventListener(
+        "click",
+        loadOlderMessages
+    );
+
+    // Bootstrap displays the modal only after its backdrop has faded in,
+    // so a conversation that loaded sooner is scrolled to its latest
+    // message once the modal is shown.
+    modal.addEventListener(
+        "shown.bs.modal",
+        scrollConversationToLatest
+    );
+
     // Restore read-only mode whenever the modal closes.
     modal.addEventListener(
         "hidden.bs.modal",
@@ -1064,6 +1233,7 @@ function getTicketDetailsModal() {
             editSnapshot = null;
             historyRequestId++;
             agentRequestId++;
+            closeConversation();
             showTicketReadOnlyMode();
         }
     );
@@ -1154,6 +1324,9 @@ function renderTicketDetails(ticket) {
     populateTicketDetails(ticket);
 
     updateTicketActions(ticket);
+
+    // Reply permission follows the ticket's latest status/assignee.
+    updateConversationComposer(ticket);
 
     if (canAssignTicket()) {
 
@@ -1590,6 +1763,7 @@ async function reloadActiveTicket() {
         await Promise.all([
             loadTickets(),
             loadTicketHistory(ticketId),
+            loadConversation(ticketId),
             canAssignTicket() ? loadAssignableAgents() : null
         ]);
 
@@ -1664,6 +1838,10 @@ function showTicketDetails(ticket) {
     showTicketReadOnlyMode();
 
     bootstrap.Modal.getOrCreateInstance(modalElement).show();
+
+    // Every participant who can open the ticket can read its
+    // conversation (the API checks who may).
+    openConversation(ticket.id);
 
     // Staff-only content loads after the modal is visible.
     if (canViewHistory()) {
@@ -2345,6 +2523,750 @@ async function loadTicketHistory(ticketId) {
             error.message || "Unable to load ticket activity.",
             "danger"
         );
+
+    }
+
+}
+
+
+// =========================================
+// CONVERSATION (EVERY PARTICIPANT)
+// =========================================
+//
+// Messages are rendered with DOM nodes and textContent only, never as
+// HTML. The API decides who may read and write; the composer only
+// mirrors those rules so nobody is offered an action that would fail.
+
+// Number of characters as the API counts them (Unicode code points).
+function messageLength(text) {
+
+    return [...text].length;
+
+}
+
+
+// Whether the current user may reply on this ticket, and why not.
+function getComposerPermission(ticket) {
+
+    if (!currentUser || !ticket) {
+
+        return {
+            allowed: false,
+            reason: "Your profile could not be loaded, so you cannot reply."
+        };
+
+    }
+
+    if (ticket.status === STATUS_RESOLVED) {
+
+        return {
+            allowed: false,
+            reason: isStaff(currentUser)
+                ? "This ticket has been resolved. Reopen it to continue " +
+                    "the conversation."
+                : "This ticket has been resolved. The support team must " +
+                    "reopen it before the conversation can continue."
+        };
+
+    }
+
+    if (isAdmin(currentUser)) {
+        return { allowed: true, reason: "" };
+    }
+
+    if (isAgent(currentUser)) {
+
+        if (isAssignedToCurrentUser(ticket)) {
+            return { allowed: true, reason: "" };
+        }
+
+        return {
+            allowed: false,
+            reason: hasAssignee(ticket)
+                ? "This ticket is assigned to another agent. You can view " +
+                    "the conversation but cannot reply."
+                : "This ticket is not assigned to you. You can view the " +
+                    "conversation but cannot reply. Claim it to reply."
+        };
+
+    }
+
+    // Customers only ever receive their own tickets from the API.
+    if (isCustomer(currentUser)) {
+        return { allowed: true, reason: "" };
+    }
+
+    return {
+        allowed: false,
+        reason: "You can view this conversation but cannot reply."
+    };
+
+}
+
+
+// Show the composer or the read-only notice for this ticket.
+function updateConversationComposer(ticket) {
+
+    const composer = getModalElement("conversationComposer");
+    const notice = getModalElement("conversationReadOnlyNotice");
+
+    if (!composer || !notice) {
+        return;
+    }
+
+    const permission = getComposerPermission(ticket);
+    const sending = ticket && sendingTicketId === ticket.id;
+
+    composer.classList.toggle("d-none", !permission.allowed);
+
+    notice.textContent = permission.reason;
+    notice.classList.toggle("d-none", permission.allowed);
+
+    const input = getModalElement("conversationInput");
+    const button = getModalElement("sendMessageButton");
+
+    input.disabled = !permission.allowed;
+    input.readOnly = Boolean(sending);
+
+    button.disabled = !permission.allowed || Boolean(sending);
+    button.textContent = sending ? "Sending..." : "Send";
+
+    updateComposerCharacterCount();
+
+}
+
+
+function updateComposerCharacterCount() {
+
+    const input = getModalElement("conversationInput");
+    const counter = getModalElement("conversationCharCount");
+
+    if (!input || !counter) {
+        return;
+    }
+
+    const length = messageLength(input.value.trim());
+
+    // Only shown near the limit, to keep the composer quiet.
+    if (length < MAX_MESSAGE_LENGTH * 0.8) {
+
+        counter.textContent = "";
+        counter.classList.remove("is-over");
+
+        return;
+
+    }
+
+    counter.textContent =
+        `${length.toLocaleString()} / ${MAX_MESSAGE_LENGTH.toLocaleString()}`;
+    counter.classList.toggle("is-over", length > MAX_MESSAGE_LENGTH);
+
+}
+
+
+function setConversationState(message, type = "muted") {
+
+    const state = getModalElement("conversationState");
+
+    if (!state) {
+        return;
+    }
+
+    state.textContent = message;
+
+    state.className = message
+        ? `conversation-state text-${type}`
+        : "conversation-state d-none";
+
+}
+
+
+function updateConversationSummary() {
+
+    const summary = getModalElement("conversationSummary");
+
+    if (!summary) {
+        return;
+    }
+
+    const count = conversation.total;
+
+    const countText = count === 0
+        ? "No messages yet"
+        : `${count.toLocaleString()} ${count === 1 ? "message" : "messages"}`;
+
+    // Staff are reminded that there are no internal notes.
+    summary.textContent = isStaff(currentUser)
+        ? `${countText} · Visible to the customer and the support team.`
+        : `${countText} · Visible to you and the support team.`;
+
+}
+
+
+function showConversationAlert(message, type = "danger", onReload = null) {
+
+    setAlert(getModalElement("conversationAlert"), message, type, onReload);
+
+}
+
+
+// A message the API returned for this ticket, with the expected fields.
+function isValidMessage(message, ticketId) {
+
+    return Boolean(
+        message &&
+        typeof message === "object" &&
+        Number.isSafeInteger(message.id) &&
+        message.ticket_id === ticketId &&
+        Number.isSafeInteger(message.sender_user_id) &&
+        typeof message.sender_name === "string" &&
+        typeof message.sender_role === "string" &&
+        typeof message.content === "string" &&
+        typeof message.created_at === "string"
+    );
+
+}
+
+
+// Add messages once each, keeping the list oldest first.
+function mergeMessages(messages) {
+
+    messages.forEach(message => {
+
+        if (!conversation.messageIds.has(message.id)) {
+
+            conversation.messageIds.add(message.id);
+            conversation.messages.push(message);
+
+        }
+
+    });
+
+    // IDs follow insertion order (the API's stable cursor).
+    conversation.messages.sort((first, second) => first.id - second.id);
+
+}
+
+
+function senderInitials(name) {
+
+    const initials = name
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map(part => [...part][0])
+        .join("")
+        .toUpperCase();
+
+    return initials || "?";
+
+}
+
+
+function senderRoleLabel(role) {
+
+    return isKnownRole(role) ? formatRole(role) : "User";
+
+}
+
+
+function createMessageElement(message) {
+
+    const isOwn = Boolean(
+        currentUser && message.sender_user_id === currentUser.id
+    );
+
+    const roleClass = isKnownRole(message.sender_role)
+        ? `role-${message.sender_role}`
+        : "role-unknown";
+
+    const item = document.createElement("li");
+    item.className = `conversation-message ${roleClass}` +
+        (isOwn ? " is-own" : "");
+    item.dataset.messageId = String(message.id);
+
+    const avatar = document.createElement("span");
+    avatar.className = "conversation-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    avatar.textContent = senderInitials(message.sender_name);
+
+    const bubble = document.createElement("div");
+    bubble.className = "conversation-bubble";
+
+    const meta = document.createElement("div");
+    meta.className = "conversation-meta";
+
+    const sender = document.createElement("span");
+    sender.className = "conversation-sender";
+    sender.textContent = isOwn
+        ? `${message.sender_name} (you)`
+        : message.sender_name;
+
+    const role = document.createElement("span");
+    role.className = "conversation-role";
+    role.textContent = senderRoleLabel(message.sender_role);
+
+    const time = document.createElement("time");
+    time.className = "conversation-time";
+
+    const date = parseApiDate(message.created_at);
+
+    if (date) {
+        time.dateTime = date.toISOString();
+    }
+
+    time.textContent = formatDateTime(message.created_at);
+
+    meta.append(sender, role, time);
+
+    // Plain text: line breaks are kept by CSS (pre-wrap).
+    const content = document.createElement("p");
+    content.className = "conversation-content";
+    content.textContent = message.content;
+
+    bubble.append(meta, content);
+
+    item.append(avatar, bubble);
+
+    return item;
+
+}
+
+
+function renderConversation() {
+
+    const list = getModalElement("conversationList");
+    const olderButton = getModalElement("loadOlderMessagesButton");
+
+    if (!list) {
+        return;
+    }
+
+    list.replaceChildren(
+        ...conversation.messages.map(createMessageElement)
+    );
+
+    olderButton.classList.toggle("d-none", !conversation.hasOlder);
+    olderButton.disabled = conversation.loadingOlder;
+    olderButton.textContent = conversation.loadingOlder
+        ? "Loading..."
+        : "Load older messages";
+
+    if (conversation.messages.length === 0) {
+        setConversationState("No messages yet. Start the conversation below.");
+    } else {
+        setConversationState("");
+    }
+
+    updateConversationSummary();
+
+}
+
+
+function scrollConversationToLatest() {
+
+    const thread = getModalElement("conversationThread");
+
+    if (thread) {
+        thread.scrollTop = thread.scrollHeight;
+    }
+
+}
+
+
+// Fetch one page (newest first) and the conversation's total.
+async function fetchMessagePage(ticketId, beforeId = null) {
+
+    const params = new URLSearchParams({
+        limit: String(MESSAGE_PAGE_SIZE)
+    });
+
+    if (beforeId !== null) {
+        params.set("before_id", String(beforeId));
+    }
+
+    const response = await authenticatedFetch(
+        `/api/tickets/${ticketId}/messages?${params}`
+    );
+
+    await checkApiResponse(response, "Unable to load the conversation.");
+
+    const page = await readJsonResponse(response);
+
+    if (
+        !Array.isArray(page) ||
+        !page.every(message => isValidMessage(message, ticketId))
+    ) {
+
+        throw new Error(
+            "The server returned an invalid conversation response."
+        );
+
+    }
+
+    return {
+        messages: page,
+        total: parseTotalCount(response)
+    };
+
+}
+
+
+// Whether more (older) messages may exist after loading a page.
+function olderMessagesMayExist(pageLength, total) {
+
+    if (pageLength < MESSAGE_PAGE_SIZE) {
+        return false;
+    }
+
+    return total === null || conversation.messages.length < total;
+
+}
+
+
+function isCurrentConversation(requestId, ticketId) {
+
+    return Boolean(
+        requestId === conversation.requestId &&
+        conversation.ticketId === ticketId &&
+        activeTicket &&
+        activeTicket.id === ticketId
+    );
+
+}
+
+
+// Remember the unsent text of the conversation being left.
+function saveConversationDraft() {
+
+    const input = getModalElement("conversationInput");
+
+    if (conversation.ticketId === null || !input) {
+        return;
+    }
+
+    if (input.value.trim()) {
+        conversationDrafts.set(conversation.ticketId, input.value);
+    } else {
+        conversationDrafts.delete(conversation.ticketId);
+    }
+
+}
+
+
+// Show a ticket's conversation: reset, restore its draft, load it.
+function openConversation(ticketId) {
+
+    saveConversationDraft();
+
+    const input = getModalElement("conversationInput");
+
+    if (input) {
+        input.value = conversationDrafts.get(ticketId) || "";
+    }
+
+    hideAlert(getModalElement("conversationAlert"));
+
+    updateConversationComposer(activeTicket);
+
+    loadConversation(ticketId);
+
+}
+
+
+// The modal closed: keep the draft, ignore late responses.
+function closeConversation() {
+
+    saveConversationDraft();
+
+    conversation.requestId++;
+    conversation.ticketId = null;
+
+}
+
+
+// Load (or reload) the newest page of a ticket's conversation.
+async function loadConversation(ticketId) {
+
+    if (!getModalElement("conversationList")) {
+        return;
+    }
+
+    const requestId = ++conversation.requestId;
+
+    conversation.ticketId = ticketId;
+    conversation.messages = [];
+    conversation.messageIds = new Set();
+    conversation.total = 0;
+    conversation.hasOlder = false;
+    conversation.loadingOlder = false;
+
+    getModalElement("conversationList").replaceChildren();
+    getModalElement("loadOlderMessagesButton").classList.add("d-none");
+    getModalElement("conversationSummary").textContent = "";
+    hideAlert(getModalElement("conversationAlert"));
+
+    setConversationState("Loading conversation...");
+
+    try {
+
+        const page = await fetchMessagePage(ticketId);
+
+        if (!isCurrentConversation(requestId, ticketId)) {
+            return;
+        }
+
+        mergeMessages(page.messages);
+
+        conversation.total = page.total ?? conversation.messages.length;
+        conversation.hasOlder = olderMessagesMayExist(
+            page.messages.length,
+            page.total
+        );
+
+        renderConversation();
+
+        scrollConversationToLatest();
+
+    } catch (error) {
+
+        if (
+            !isCurrentConversation(requestId, ticketId) ||
+            isAuthenticationError(error)
+        ) {
+            return;
+        }
+
+        // Contained error: the rest of the modal keeps working.
+        setConversationState(
+            error.status === 404
+                ? "This ticket's conversation is not available."
+                : (error.message || "Unable to load the conversation."),
+            "danger"
+        );
+
+    }
+
+}
+
+
+async function loadOlderMessages() {
+
+    const ticketId = conversation.ticketId;
+    const requestId = conversation.requestId;
+    const oldest = conversation.messages[0];
+
+    if (
+        ticketId === null ||
+        !oldest ||
+        conversation.loadingOlder ||
+        !conversation.hasOlder
+    ) {
+        return;
+    }
+
+    conversation.loadingOlder = true;
+    renderConversation();
+
+    const thread = getModalElement("conversationThread");
+
+    try {
+
+        const page = await fetchMessagePage(ticketId, oldest.id);
+
+        if (!isCurrentConversation(requestId, ticketId)) {
+            return;
+        }
+
+        // Keep the messages the user is reading where they are.
+        const previousHeight = thread.scrollHeight;
+        const previousTop = thread.scrollTop;
+
+        mergeMessages(page.messages);
+
+        if (page.total !== null) {
+            conversation.total = page.total;
+        }
+
+        conversation.hasOlder = olderMessagesMayExist(
+            page.messages.length,
+            page.total
+        );
+        conversation.loadingOlder = false;
+
+        renderConversation();
+
+        thread.scrollTop =
+            thread.scrollHeight - previousHeight + previousTop;
+
+    } catch (error) {
+
+        if (
+            !isCurrentConversation(requestId, ticketId) ||
+            isAuthenticationError(error)
+        ) {
+            return;
+        }
+
+        conversation.loadingOlder = false;
+        renderConversation();
+
+        showConversationAlert(
+            error.message || "Unable to load older messages.",
+            "danger"
+        );
+
+    }
+
+}
+
+
+// Enter sends; Shift+Enter (and IME composition) inserts text.
+function handleComposerKeydown(event) {
+
+    if (
+        event.key !== "Enter" ||
+        event.shiftKey ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.isComposing ||
+        event.keyCode === 229
+    ) {
+        return;
+    }
+
+    event.preventDefault();
+
+    sendConversationMessage();
+
+}
+
+
+async function sendConversationMessage() {
+
+    // One send at a time: a double click or repeated Enter is ignored.
+    if (!activeTicket || sendingTicketId !== null) {
+        return;
+    }
+
+    const ticket = activeTicket;
+    const ticketId = ticket.id;
+
+    if (!getComposerPermission(ticket).allowed) {
+        return;
+    }
+
+    const input = getModalElement("conversationInput");
+    const content = input.value.trim();
+
+    if (!content) {
+
+        showConversationAlert("Write a message before sending.", "warning");
+        input.focus();
+
+        return;
+
+    }
+
+    if (messageLength(content) > MAX_MESSAGE_LENGTH) {
+
+        showConversationAlert(
+            "Messages can be at most " +
+            `${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`,
+            "warning"
+        );
+
+        return;
+
+    }
+
+    hideAlert(getModalElement("conversationAlert"));
+
+    sendingTicketId = ticketId;
+    updateConversationComposer(ticket);
+
+    try {
+
+        // A single attempt: a failed POST is never retried.
+        const message = await apiRequest(
+            `/api/tickets/${ticketId}/messages`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ content })
+            },
+            "Unable to send the message."
+        );
+
+        if (!isValidMessage(message, ticketId)) {
+
+            throw new Error(
+                "The message may have been sent, but the server's " +
+                "response was invalid. Reload the ticket to check."
+            );
+
+        }
+
+        // Sent: the draft is no longer needed, wherever the user is now.
+        conversationDrafts.delete(ticketId);
+
+        if (conversation.ticketId !== ticketId) {
+            return;
+        }
+
+        // Cleared only now that the message is confirmed.
+        input.value = "";
+
+        mergeMessages([message]);
+        conversation.total += 1;
+
+        renderConversation();
+
+        scrollConversationToLatest();
+
+    } catch (error) {
+
+        if (
+            isAuthenticationError(error) ||
+            conversation.ticketId !== ticketId
+        ) {
+            return;
+        }
+
+        // The draft stays in the composer. Permission or state changes
+        // (403/404/409) offer a reload of the ticket instead of a retry.
+        const stateChanged = [403, 404, 409].includes(error.status);
+
+        showConversationAlert(
+            stateChanged
+                ? `${error.message} Your message has not been sent and is ` +
+                    "still in the box below."
+                : (error.message || "Unable to send the message.") +
+                    " Your message is still in the box below.",
+            stateChanged ? "warning" : "danger",
+            stateChanged ? reloadActiveTicket : null
+        );
+
+    } finally {
+
+        sendingTicketId = null;
+
+        if (activeTicket) {
+            updateConversationComposer(activeTicket);
+        }
+
+        if (
+            activeTicket &&
+            activeTicket.id === ticketId &&
+            conversation.ticketId === ticketId &&
+            !input.disabled
+        ) {
+            input.focus();
+        }
 
     }
 

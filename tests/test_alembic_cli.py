@@ -35,7 +35,7 @@ from app.db.migrations import (
 )
 
 
-HEAD_REVISION = "0003"
+HEAD_REVISION = "0004"
 
 FAKE_HASH = "$argon2id$v=19$m=65536,t=3,p=4$ZmFrZS1zYWx0$ZmFrZS1oYXNoLXZhbHVl"
 RAW_DRIVER_TEXT = "driver detail leaked"
@@ -662,6 +662,7 @@ def test_upgrade_downgrade_and_stamp_still_work(tmp_path: Path) -> None:
         "users",
         "tickets",
         "ticket_events",
+        "ticket_messages",
         "revoked_tokens",
     }
     assert _revisions(database_file) == [HEAD_REVISION]

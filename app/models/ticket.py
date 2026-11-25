@@ -20,6 +20,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.ticket_event import TicketEvent
+    from app.models.ticket_message import TicketMessage
     from app.models.user import User
 
 
@@ -159,4 +160,15 @@ class Ticket(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="(TicketEvent.created_at, TicketEvent.id)",
+    )
+
+    # Conversation messages, in insertion (ID) order. Deleted with the
+    # ticket exactly like its events (ON DELETE CASCADE plus
+    # passive_deletes). Adding a message never changes the ticket row, so
+    # it does not bump ``version``.
+    messages: Mapped[list[TicketMessage]] = relationship(
+        back_populates="ticket",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="TicketMessage.id",
     )
