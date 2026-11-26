@@ -6,8 +6,9 @@ right after its locked reads (inside its BEGIN IMMEDIATE transaction);
 the second must wait for it. Whatever the order, a message is stored only
 if its sender was allowed to write when it was committed: an agent never
 writes on a ticket they no longer hold, nobody writes on a resolved
-ticket, and a refused message leaves nothing behind. resolveai.db is
-never used.
+ticket, and a refused message leaves nothing behind. A stored message's
+notifications go to whoever was assigned and active at its serialised
+point, and roll back with it. resolveai.db is never used.
 """
 
 import threading
@@ -484,3 +485,206 @@ def test_lock_time_out_writes_nothing(world: SimpleNamespace) -> None:
         short_engine.dispose()
 
     assert _messages(world.engine, world.held) == []
+
+
+# ---------------------------------------------------------------------------
+# Notifications (Phase 10): recipients follow the serialised order
+# ---------------------------------------------------------------------------
+
+
+def _notified(engine) -> dict[int, list[int]]:
+    """Recipient IDs per message ID, as committed."""
+
+    recipients: dict[int, list[int]] = {}
+
+    with engine.connect() as connection:
+        for message_id, recipient_id in connection.execute(
+            text(
+                "SELECT message_id, recipient_user_id FROM notifications "
+                "ORDER BY message_id, recipient_user_id"
+            )
+        ):
+            recipients.setdefault(message_id, []).append(recipient_id)
+
+    return recipients
+
+
+def _notification_rows(engine) -> list[tuple]:
+    with engine.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.execute(
+                text(
+                    "SELECT n.message_id, n.recipient_user_id, n.actor_user_id, "
+                    "n.ticket_id, m.ticket_id, m.sender_user_id "
+                    "FROM notifications n JOIN ticket_messages m "
+                    "ON m.id = n.message_id ORDER BY n.id"
+                )
+            )
+        ]
+
+
+def test_unassignment_first_sends_the_customers_message_to_admins(
+    monkeypatch: pytest.MonkeyPatch,
+    world: SimpleNamespace,
+) -> None:
+    first, second, waited = _race(
+        monkeypatch, TICKET_LOCK, _unassign(world), _send(world, "customer", "help?")
+    )
+
+    assert waited
+    assert first == {"result": None}
+    message_id = second["result"]
+
+    # The ticket was unassigned before the message: the former agent is
+    # not notified; every active administrator is.
+    assert _notified(world.engine) == {message_id: [world.admin_a, world.admin_b]}
+    _assert_no_write_lock_left(world.engine)
+
+
+def test_customer_message_first_notifies_the_agent_assigned_then(
+    monkeypatch: pytest.MonkeyPatch,
+    world: SimpleNamespace,
+) -> None:
+    first, second, waited = _race(
+        monkeypatch, MESSAGE_LOCK, _send(world, "customer", "help?"), _unassign(world)
+    )
+
+    assert waited
+    assert second == {"result": None}
+    # The agent held the ticket when the message committed.
+    assert _notified(world.engine) == {first["result"]: [world.agent]}
+    assert _ticket(world.engine, world.held) == (None, "Open", 2)
+
+
+def test_deactivation_first_sends_the_customers_message_to_admins(
+    monkeypatch: pytest.MonkeyPatch,
+    world: SimpleNamespace,
+) -> None:
+    first, second, waited = _race(
+        monkeypatch,
+        USER_LOCK,
+        _deactivate_agent(world),
+        _send(world, "customer", "help?"),
+    )
+
+    assert waited
+    assert first == {"result": (world.held,)}
+    assert _notified(world.engine) == {
+        second["result"]: [world.admin_a, world.admin_b]
+    }
+
+
+def test_customer_message_first_notifies_the_agent_before_deactivation(
+    monkeypatch: pytest.MonkeyPatch,
+    world: SimpleNamespace,
+) -> None:
+    first, second, waited = _race(
+        monkeypatch,
+        MESSAGE_LOCK,
+        _send(world, "customer", "help?"),
+        _deactivate_agent(world),
+    )
+
+    assert waited
+    assert second == {"result": (world.held,)}
+    # The agent was still the active assignee when the message committed.
+    assert _notified(world.engine) == {first["result"]: [world.agent]}
+
+
+def test_simultaneous_messages_each_notify_their_recipients_once(
+    monkeypatch: pytest.MonkeyPatch,
+    world: SimpleNamespace,
+) -> None:
+    first, second, waited = _race(
+        monkeypatch,
+        MESSAGE_LOCK,
+        _send(world, "customer", "from the customer"),
+        _send(world, "agent", "from the agent"),
+    )
+
+    assert waited
+    assert _notified(world.engine) == {
+        first["result"]: [world.agent],
+        second["result"]: [world.customer],
+    }
+
+
+def test_many_concurrent_messages_notify_exactly_the_intended_recipients(
+    world: SimpleNamespace,
+) -> None:
+    expected_by_sender = {
+        "customer": [world.agent],
+        "agent": [world.customer],
+        # Rule 7b: an administrator notifies the customer and the agent.
+        "admin_a": sorted([world.customer, world.agent]),
+        "admin_b": sorted([world.customer, world.agent]),
+    }
+    senders = list(expected_by_sender) * 3
+    outcomes = []
+    threads = []
+
+    for number, sender in enumerate(senders):
+        thread, outcome = _start(_send(world, sender, f"message {number}"))
+        threads.append(thread)
+        outcomes.append((sender, outcome))
+
+    for thread in threads:
+        thread.join(WAIT_SECONDS)
+
+    assert all("result" in outcome for _sender, outcome in outcomes), outcomes
+
+    notified = _notified(world.engine)
+
+    assert notified == {
+        outcome["result"]: expected_by_sender[sender] for sender, outcome in outcomes
+    }
+
+    rows = _notification_rows(world.engine)
+    pairs = [(message_id, recipient) for message_id, recipient, *_ in rows]
+
+    assert len(pairs) == len(set(pairs)) == 3 * (1 + 1 + 2 + 2)
+
+    for _message, recipient, actor, ticket_id, message_ticket, sender in rows:
+        assert actor == sender != recipient
+        assert ticket_id == message_ticket == world.held
+
+    _assert_no_write_lock_left(world.engine)
+
+
+def test_notification_failure_inside_the_lock_rolls_back_and_releases_it(
+    monkeypatch: pytest.MonkeyPatch,
+    world: SimpleNamespace,
+) -> None:
+    real_helper = ticket_message_service.add_message_notifications
+    calls = {"count": 0}
+
+    def fail_first_time(db, message, recipient_ids):
+        added = real_helper(db, message, recipient_ids)
+        calls["count"] += 1
+
+        if calls["count"] == 1:
+            assert added  # the rows were flushed inside the transaction
+            raise RuntimeError("notification insert failed")
+
+        return added
+
+    monkeypatch.setattr(
+        ticket_message_service, "add_message_notifications", fail_first_time
+    )
+
+    with pytest.raises(RuntimeError, match="notification insert failed"):
+        _send(world, "admin_a", "never stored")()
+
+    assert _messages(world.engine, world.held) == []
+    assert _notified(world.engine) == {}
+    _assert_no_write_lock_left(world.engine)
+
+    # The next message, its notifications and a workflow change succeed.
+    message_id = _send(world, "admin_a", "stored")()
+
+    assert _notified(world.engine) == {
+        message_id: sorted([world.customer, world.agent])
+    }
+    assert _resolve(world)() == "Resolved"
+    assert _ticket(world.engine, world.held) == (world.agent, "Resolved", 2)

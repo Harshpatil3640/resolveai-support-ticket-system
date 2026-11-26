@@ -13,6 +13,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.tickets import router as tickets_router
 from app.api.routes.analytics import router as analytics_router
 from app.api.routes.admin import router as admin_router
+from app.api.routes.notifications import router as notifications_router
 from app.core.audit_logging import configure_audit_logging
 from app.db.database import engine
 from app.db.errors import (
@@ -132,6 +133,12 @@ app.include_router(
 app.include_router(
     admin_router,
     prefix="/api/admin",
+)
+
+# Register the authenticated user's notification endpoints.
+app.include_router(
+    notifications_router,
+    prefix="/api/notifications",
 )
 
 

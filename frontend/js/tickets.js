@@ -2972,6 +2972,12 @@ function openConversation(ticketId) {
 
     loadConversation(ticketId);
 
+    // Phase 10: the user is reading this ticket now, so its
+    // notifications are read. Not awaited and never throws: the
+    // conversation loads whether or not this succeeds, and a late
+    // result only updates the notification badge.
+    window.ResolveAINotifications?.markTicketRead(ticketId);
+
 }
 
 
