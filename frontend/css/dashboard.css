@@ -634,3 +634,279 @@
     }
 
 }
+
+
+/* =========================================
+   NOTIFICATIONS (PHASE 10)
+========================================= */
+
+/* The bell, its badge and its panel are shown by notifications.js; the
+   HTML hidden attribute must win over the display rules below. */
+.notification-center[hidden],
+.notification-center [hidden] {
+    display: none !important;
+}
+
+.notification-center {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.notification-bell {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    border: 1px solid #e2e8f0;
+    border-radius: 50%;
+    background: #ffffff;
+    color: #4a5a72;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.notification-bell:hover,
+.notification-center.is-open .notification-bell {
+    border-color: #c9d6f5;
+    background: #e9efff;
+    color: #4779e8;
+}
+
+.notification-bell:focus-visible {
+    outline: 3px solid rgba(71, 121, 232, 0.45);
+    outline-offset: 2px;
+}
+
+.notification-badge {
+    position: absolute;
+    top: -4px;
+    right: -6px;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border: 2px solid #ffffff;
+    border-radius: 999px;
+    background: #e5484d;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+}
+
+.notification-panel {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    z-index: 1050;
+    display: flex;
+    flex-direction: column;
+    width: 380px;
+    max-width: calc(100vw - 32px);
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 16px 40px rgba(23, 36, 58, 0.16);
+    overflow: hidden;
+}
+
+.notification-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid #e9edf3;
+}
+
+.notification-panel-title {
+    margin: 0;
+    color: #1b2537;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.notification-mark-all {
+    padding: 0;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.notification-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 22px 16px;
+    color: #718096;
+    font-size: 13px;
+    text-align: center;
+}
+
+.notification-status[data-kind="error"] {
+    color: #b42318;
+}
+
+.notification-list {
+    max-height: min(420px, 60vh);
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.notification-group {
+    border-bottom: 1px solid #f0f3f8;
+}
+
+.notification-group:last-child {
+    border-bottom: 0;
+}
+
+.notification-ticket-title {
+    margin: 0;
+    padding: 10px 16px 2px;
+    overflow: hidden;
+    color: #1b2537;
+    font-size: 13px;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.notification-group-count {
+    color: #718096;
+    font-weight: 500;
+}
+
+.notification-group-items {
+    margin: 0;
+    padding: 0 0 6px;
+    list-style: none;
+}
+
+.notification-item {
+    position: relative;
+    display: block;
+    padding: 8px 16px 8px 28px;
+    color: inherit;
+    text-decoration: none;
+}
+
+.notification-item:hover {
+    background: #f7f9fc;
+    color: inherit;
+}
+
+.notification-item:focus-visible {
+    outline: 2px solid #4779e8;
+    outline-offset: -2px;
+    background: #f7f9fc;
+}
+
+/* Unread: a dot, a tinted background and stronger text. */
+.notification-item.is-unread {
+    background: #f3f7ff;
+}
+
+.notification-item.is-unread::before {
+    content: "";
+    position: absolute;
+    top: 15px;
+    left: 12px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4779e8;
+}
+
+.notification-item.is-unread .notification-preview {
+    color: #1b2537;
+    font-weight: 600;
+}
+
+.notification-item.is-read .notification-preview {
+    color: #718096;
+}
+
+.notification-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 2px;
+    font-size: 12px;
+}
+
+.notification-actor {
+    color: #273449;
+    font-weight: 600;
+}
+
+.notification-role {
+    color: #8491a5;
+}
+
+.notification-time {
+    margin-left: auto;
+    color: #8491a5;
+    white-space: nowrap;
+}
+
+.notification-preview {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.notification-panel-footer {
+    display: flex;
+    justify-content: center;
+}
+
+.notification-load-more {
+    width: 100%;
+    margin: 0;
+    border-top: 1px solid #e9edf3;
+    border-radius: 0;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+@media (max-width: 768px) {
+
+    /* The profile wraps (and the sidebar stacks above the header) on
+       small screens: the panel opens just below the header, at its right
+       edge, instead of under the bell. It fills a phone's width (16px
+       margins) but is never wider than on desktop, and it scrolls with
+       the page, so it never covers the navigation. */
+    .dashboard-topbar {
+        position: relative;
+    }
+
+    .notification-center {
+        position: static;
+    }
+
+    .notification-panel {
+        top: calc(100% - 8px);
+        right: 16px;
+        left: auto;
+        width: min(380px, calc(100% - 32px));
+        max-width: none;
+    }
+
+    .notification-list {
+        max-height: 60vh;
+    }
+
+}

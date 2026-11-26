@@ -103,6 +103,91 @@
 
                 <div class="agent-profile">
 
+                    <!-- Notifications (Phase 10): hidden until the profile loads -->
+                    <div class="notification-center" id="notificationCenter" hidden>
+
+                        <button
+                            type="button"
+                            class="notification-bell"
+                            id="notificationBell"
+                            aria-label="Notifications"
+                            aria-haspopup="true"
+                            aria-expanded="false"
+                            aria-controls="notificationPanel"
+                        >
+                            <svg
+                                class="notification-bell-icon"
+                                viewBox="0 0 24 24"
+                                width="20"
+                                height="20"
+                                aria-hidden="true"
+                                focusable="false"
+                            >
+                                <path
+                                    fill="currentColor"
+                                    d="M12 3a6 6 0 0 0-6 6v3.6l-1.7 2.7A1 1 0 0 0 5.1 17h13.8a1 1 0 0 0 .8-1.7L18 12.6V9a6 6 0 0 0-6-6zm0 19a3 3 0 0 0 2.8-2H9.2a3 3 0 0 0 2.8 2z"
+                                />
+                            </svg>
+
+                            <span
+                                class="notification-badge"
+                                id="notificationBadge"
+                                aria-live="polite"
+                                hidden
+                            ></span>
+                        </button>
+
+                        <div
+                            class="notification-panel"
+                            id="notificationPanel"
+                            role="region"
+                            aria-labelledby="notificationPanelTitle"
+                            hidden
+                        >
+
+                            <div class="notification-panel-header">
+
+                                <h2 class="notification-panel-title" id="notificationPanelTitle">
+                                    Notifications
+                                </h2>
+
+                                <button
+                                    type="button"
+                                    class="btn btn-link btn-sm notification-mark-all"
+                                    id="notificationMarkAll"
+                                    disabled
+                                >
+                                    Mark all read
+                                </button>
+
+                            </div>
+
+                            <div
+                                class="notification-status"
+                                id="notificationStatus"
+                                role="status"
+                                hidden
+                            ></div>
+
+                            <ul class="notification-list" id="notificationList"></ul>
+
+                            <div class="notification-panel-footer">
+
+                                <button
+                                    type="button"
+                                    class="btn btn-light btn-sm notification-load-more"
+                                    id="notificationLoadMore"
+                                    hidden
+                                >
+                                    Load more
+                                </button>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
                     <div class="agent-avatar" id="agentAvatar">
                         --
                     </div>
@@ -760,6 +845,9 @@
 
     <!-- Shared utilities (must load before page scripts) -->
     <script src="./js/common.js" defer></script>
+
+    <!-- Notification bell and polling (after common.js, before the page script) -->
+    <script src="./js/notifications.js" defer></script>
 
     <!-- Dashboard JavaScript -->
     <script src="./js/dashboard.js" defer></script>

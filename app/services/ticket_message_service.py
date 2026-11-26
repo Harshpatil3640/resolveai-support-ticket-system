@@ -23,17 +23,27 @@ Business rules (Phase 9):
 * Messages are append-only. They never change the ticket row (so its
   optimistic ``version`` is untouched) and never create a
   ``ticket_events`` row.
+* Notifications (Phase 10). Each new message notifies its recipients
+  (``app.services.notification_service.resolve_message_recipients``),
+  written in the message's own transaction: the message and its
+  notifications are committed together or not at all.
 
 Transactions. ``create_ticket_message`` owns the session's transaction.
 It starts it with the shared serialised-change lock (``app.db.locking``:
 SQLite's ``BEGIN IMMEDIATE``), re-reads the acting user and the ticket
 inside it (``SELECT ... FOR UPDATE`` where supported, user row before
 ticket row, the global lock order of ``app.services.ticket_workflow``),
-checks every rule, inserts the message and commits. A concurrent
-unassignment, deactivation, role change or resolution therefore either
-commits before the checks (and the message is refused) or waits until
-the message has committed. On ANY failure the transaction is rolled back
-(nothing is inserted) and the original error re-raised; a failed
+checks every rule, inserts the message, then reads the recipient context
+(``_load_recipient_context``: the assignee, the creator and the active
+administrator IDs, with plain reads and NO row locks, so the global lock
+order of administrators, then users, then tickets is never reversed) and
+inserts the notifications, and commits. A concurrent unassignment,
+deactivation, role change or resolution therefore either commits before
+the checks (and the message is refused, or notifies whoever is assigned
+and active after it) or waits until the message and its notifications
+have committed. On ANY failure, including a failed notification insert,
+the transaction is rolled back (neither the message nor any notification
+is kept; no savepoint) and the original error re-raised; a failed
 rollback is attached as a secondary failure
 (``app.db.errors.rollback_failure_of``).
 
@@ -52,6 +62,10 @@ from app.db import locking as _locking
 from app.db.errors import roll_back_keeping_primary
 from app.models import Ticket, TicketMessage, User
 from app.models.ticket_message import MAX_MESSAGE_LENGTH
+from app.services.notification_service import (
+    add_message_notifications,
+    resolve_message_recipients,
+)
 from app.services.ticket_workflow import (
     STATUS_RESOLVED,
     TicketNotFoundError,
@@ -366,6 +380,61 @@ def _lock_for_message(
     return actor, ticket
 
 
+def _active_admin_ids() -> Select:
+    """IDs of the active administrators, in id order. Never locks rows."""
+
+    return (
+        select(User.id)
+        .where(
+            User.role == UserRole.ADMIN.value,
+            User.is_active.is_(True),
+        )
+        .order_by(User.id)
+    )
+
+
+def _user_by_id(user_id: int) -> Select:
+    """One user row, refreshed from the database. Never locks the row."""
+
+    return (
+        select(User)
+        .where(User.id == user_id)
+        # Overwrite any stale copy already in the session.
+        .execution_options(populate_existing=True)
+    )
+
+
+def _load_recipient_context(
+    db: Session,
+    ticket: Ticket,
+) -> tuple[User | None, User | None, list[int]]:
+    """Read who a message on ``ticket`` may notify: (assignee, creator, admins).
+
+    Runs inside the message's serialised transaction, after the actor and
+    ticket rows were locked. Every read is a plain SELECT: locking user
+    rows here, after the ticket, would reverse the global lock order
+    (``app.services.user_locking``). On SQLite the transaction's
+    ``BEGIN IMMEDIATE`` already makes these reads consistent; elsewhere a
+    concurrent change can at worst affect who is notified, never whether
+    the message is allowed (that was decided on the locked rows).
+
+    The ticket's own ``assigned_to_user_id`` and ``created_by_user_id``
+    are the user IDs read. Whether each user is active and has the
+    expected role is checked by ``resolve_message_recipients``. A module-
+    level function so tests can observe or replace it.
+    """
+
+    assignee = (
+        None
+        if ticket.assigned_to_user_id is None
+        else db.scalars(_user_by_id(ticket.assigned_to_user_id)).one_or_none()
+    )
+    creator = db.scalars(_user_by_id(ticket.created_by_user_id)).one_or_none()
+    admin_ids = list(db.scalars(_active_admin_ids()))
+
+    return assignee, creator, admin_ids
+
+
 def create_ticket_message(
     db: Session,
     *,
@@ -378,7 +447,10 @@ def create_ticket_message(
     ``content`` is stripped and checked before any database work. Inside
     the serialised transaction the actor and ticket are re-read and the
     sending rules applied (``check_can_send_message``); then the message
-    is inserted with the actor's ID and current role and committed.
+    is inserted with the actor's ID and current role, its notifications
+    are added (recipients from ``resolve_message_recipients``, using the
+    role re-read here), and both are committed together. A valid message
+    with nobody to notify is committed on its own.
 
     Returns the new message, captured inside the transaction.
 
@@ -386,7 +458,8 @@ def create_ticket_message(
         InvalidTicketMessageError, TicketPermissionError,
         TicketNotFoundError, TicketResolvedError,
         sqlalchemy.exc.SQLAlchemyError (including a lock time-out).
-        Nothing is written when any of these is raised.
+        Nothing is written when any of these is raised, including when
+        a notification cannot be inserted.
     """
 
     text = normalise_message_content(content)
@@ -409,6 +482,18 @@ def create_ticket_message(
         db.add(message)
         # Assigns the ID; a constraint failure surfaces here, before commit.
         db.flush()
+
+        # Notifications, in the same transaction (plain reads, no locks).
+        assignee, creator, admin_ids = _load_recipient_context(db, ticket)
+        recipients = resolve_message_recipients(
+            role,
+            actor.id,
+            ticket,
+            assignee,
+            creator,
+            admin_ids,
+        )
+        add_message_notifications(db, message, recipients)
 
         view = _view(message, actor.name)
         db.commit()

@@ -54,7 +54,8 @@ from app.db.migrations import (
 from app.db.schema_inspection import compare_schemas, describe_schema
 
 
-HEAD_REVISION = "0004"
+HEAD_REVISION = "0005"
+MESSAGES_REVISION = "0004"
 ASSIGNMENT_REVISION = "0003"
 TOKEN_VERSION_REVISION = "0002"
 
@@ -249,6 +250,10 @@ def test_revision_history_is_linear_baseline_to_head() -> None:
     assert script.get_heads() == [HEAD_REVISION]
     assert (
         script.get_revision(HEAD_REVISION).down_revision
+        == MESSAGES_REVISION
+    )
+    assert (
+        script.get_revision(MESSAGES_REVISION).down_revision
         == ASSIGNMENT_REVISION
     )
     assert (
@@ -278,6 +283,7 @@ def test_upgrade_head_initialises_empty_database(
         "tickets",
         "ticket_events",
         "ticket_messages",
+        "notifications",
         "revoked_tokens",
     }
     assert _current_revision(database_file) == [HEAD_REVISION]
@@ -295,6 +301,7 @@ def test_migrated_schema_matches_sqlalchemy_models(
         "tickets",
         "ticket_events",
         "ticket_messages",
+        "notifications",
         "revoked_tokens",
     }
 
@@ -1036,6 +1043,7 @@ def test_reference_schema_is_built_from_migrations_in_a_temporary_database(
         "tickets",
         "ticket_events",
         "ticket_messages",
+        "notifications",
         "revoked_tokens",
     }
     assert reference["users"]["columns"]["token_version"] == (
@@ -2261,3 +2269,445 @@ def test_0004_model_check_constraints_match_the_migration() -> None:
     for name, text in model_checks.items():
         if name != "ck_ticket_messages_content_length":
             assert f'"{text}"' in source
+
+
+# ---------------------------------------------------------------------------
+# Revision 0005: notifications table
+# ---------------------------------------------------------------------------
+
+MIGRATION_0005 = (
+    Path(__file__).resolve().parents[1]
+    / "alembic"
+    / "versions"
+    / "0005_notifications.py"
+)
+
+# Phase 9 data at revision 0004, on top of DATA_0002_SQL and
+# DATA_0003_SQL: conversations on all three tickets (customer, agent and
+# administrator senders).
+DATA_0004_SQL = [
+    f"INSERT INTO ticket_messages (id, {TICKET_MESSAGE_COLUMNS}) VALUES "
+    "(1, 2, 3, 'customer', 'My refund is still missing.', "
+    "'2026-11-25 10:00:00.000000')",
+    f"INSERT INTO ticket_messages (id, {TICKET_MESSAGE_COLUMNS}) VALUES "
+    "(2, 2, 1, 'agent', 'Looking into it now.', "
+    "'2026-11-25 10:05:00.000000')",
+    f"INSERT INTO ticket_messages (id, {TICKET_MESSAGE_COLUMNS}) VALUES "
+    "(3, 1, 1, 'agent', 'Card issuer contacted.', "
+    "'2026-11-25 11:00:00.000000')",
+    f"INSERT INTO ticket_messages (id, {TICKET_MESSAGE_COLUMNS}) VALUES "
+    "(4, 3, 2, 'admin', 'Closing this one.', "
+    "'2026-11-25 12:00:00.000000')",
+]
+
+NOTIFICATION_COLUMNS = (
+    "recipient_user_id, actor_user_id, ticket_id, message_id, "
+    "notification_type, created_at, read_at"
+)
+
+PHASE_9_TABLES = (*PHASE_7_TABLES, "ticket_messages")
+
+NOTIFICATION_INDEXES = {
+    "ix_notifications_recipient_user_id_id": ["recipient_user_id", "id"],
+    "ix_notifications_recipient_user_id_read_at": ["recipient_user_id", "read_at"],
+    "ix_notifications_ticket_id": ["ticket_id"],
+}
+
+
+def _load_migration_0005():
+    spec = importlib.util.spec_from_file_location("migration_0005", MIGRATION_0005)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    return migration
+
+
+@pytest.fixture
+def database_0004(tmp_path: Path) -> Path:
+    """A genuine revision-0004 database (built by the migrations) with data."""
+
+    path = tmp_path / "at_0004.db"
+    command.upgrade(_config_for(path), MESSAGES_REVISION)
+    _run_sql(path, *DATA_0002_SQL, *DATA_0003_SQL, *DATA_0004_SQL)
+
+    assert _current_revision(path) == [MESSAGES_REVISION]
+
+    return path
+
+
+def _phase_9_rows(path: Path) -> dict[str, list[tuple]]:
+    return {table: _rows(path, table) for table in PHASE_9_TABLES}
+
+
+def _insert_notification(connection: sqlite3.Connection, **overrides) -> None:
+    """By default: agent 1 notified of customer 3's message 1 on ticket 2."""
+
+    values = {
+        "recipient_user_id": 1,
+        "actor_user_id": 3,
+        "ticket_id": 2,
+        "message_id": 1,
+        "notification_type": "ticket_message",
+        "created_at": "2026-11-26 10:00:00.000000",
+        "read_at": None,
+        **overrides,
+    }
+    connection.execute(
+        f"INSERT INTO notifications ({NOTIFICATION_COLUMNS}) VALUES "
+        "(:recipient_user_id, :actor_user_id, :ticket_id, :message_id, "
+        ":notification_type, :created_at, :read_at)",
+        values,
+    )
+
+
+def test_0005_upgrade_preserves_every_phase_9_row(database_0004: Path) -> None:
+    before = _phase_9_rows(database_0004)
+
+    assert len(before["ticket_messages"]) == 4  # the fixture really has messages
+
+    command.upgrade(_config_for(database_0004), "head")
+
+    assert _current_revision(database_0004) == [HEAD_REVISION]
+    # Users, tickets, history, messages and revoked tokens keep exactly
+    # the same rows.
+    assert _phase_9_rows(database_0004) == before
+    # Existing messages are not backfilled into notifications.
+    assert _rows(database_0004, "notifications") == []
+
+    with _enforcing_connection(database_0004) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_0005_schema_has_foreign_keys_checks_unique_and_indexes(
+    database_0004: Path,
+) -> None:
+    command.upgrade(_config_for(database_0004), "head")
+
+    assert _foreign_key_list(database_0004, "notifications") == {
+        ("recipient_user_id", "users", "id", "NO ACTION"),
+        ("actor_user_id", "users", "id", "NO ACTION"),
+        ("ticket_id", "tickets", "id", "CASCADE"),
+        ("message_id", "ticket_messages", "id", "CASCADE"),
+    }
+    notifications_sql = _table_sql(database_0004, "notifications")
+
+    for name in (
+        "fk_notifications_recipient_user_id_users",
+        "fk_notifications_actor_user_id_users",
+        "fk_notifications_ticket_id_tickets",
+        "fk_notifications_message_id_ticket_messages",
+    ):
+        assert f"CONSTRAINT {name} FOREIGN KEY" in notifications_sql
+
+    assert (
+        "CONSTRAINT uq_notifications_message_id_recipient_user_id "
+        "UNIQUE (message_id, recipient_user_id)" in notifications_sql
+    )
+    assert _check_constraint_names(database_0004, "notifications") == {
+        "ck_notifications_notification_type",
+        "ck_notifications_message_required",
+        "ck_notifications_not_self",
+    }
+
+    engine = create_engine(sqlite_url(database_0004))
+
+    try:
+        unique_constraints = [
+            (constraint["name"], constraint["column_names"])
+            for constraint in inspect(engine).get_unique_constraints(
+                "notifications"
+            )
+        ]
+    finally:
+        engine.dispose()
+
+    assert unique_constraints == [
+        (
+            "uq_notifications_message_id_recipient_user_id",
+            ["message_id", "recipient_user_id"],
+        )
+    ]
+    assert _index_names(database_0004, "notifications") == set(NOTIFICATION_INDEXES)
+
+    with _connect(database_0004) as connection:
+        index_list = {
+            row[1]: row[2]
+            for row in connection.execute("PRAGMA index_list(notifications)")
+        }
+
+        for index, expected_columns in NOTIFICATION_INDEXES.items():
+            columns = [
+                row[2] for row in connection.execute(f"PRAGMA index_info({index})")
+            ]
+
+            assert columns == expected_columns
+            assert index_list[index] == 0  # not unique
+
+    columns = _describe(database_0004)["notifications"]["columns"]
+
+    assert columns == {
+        "id": ("INTEGER", False, None),
+        "recipient_user_id": ("INTEGER", False, None),
+        "actor_user_id": ("INTEGER", False, None),
+        "ticket_id": ("INTEGER", False, None),
+        "message_id": ("INTEGER", True, None),
+        "notification_type": ("VARCHAR(40)", False, None),
+        "created_at": ("DATETIME", False, None),
+        "read_at": ("DATETIME", True, None),
+    }
+
+    # Upgrading an existing database gives exactly the schema a new one gets.
+    assert compare_schemas(
+        build_reference_schema("head"), _describe(database_0004)
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"notification_type": "status_changed"},
+        {"notification_type": "Ticket_Message"},
+        {"notification_type": ""},
+        {"notification_type": None},
+        {"message_id": None},
+        {"recipient_user_id": 3},
+        {"recipient_user_id": 99},
+        {"recipient_user_id": None},
+        {"actor_user_id": 99},
+        {"actor_user_id": None},
+        {"ticket_id": 99},
+        {"ticket_id": None},
+        {"message_id": 99},
+        {"created_at": None},
+    ],
+    ids=[
+        "unknown-type",
+        "type-wrong-case",
+        "empty-type",
+        "null-type",
+        "ticket-message-without-message",
+        "self-notification",
+        "missing-recipient",
+        "null-recipient",
+        "missing-actor",
+        "null-actor",
+        "missing-ticket",
+        "null-ticket",
+        "missing-message",
+        "null-created-at",
+    ],
+)
+def test_0005_notification_constraints_are_enforced(
+    database_0004: Path,
+    overrides: dict,
+) -> None:
+    command.upgrade(_config_for(database_0004), "head")
+
+    with _enforcing_connection(database_0004) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_notification(connection, **overrides)
+
+    assert _rows(database_0004, "notifications") == []
+
+
+def test_0005_duplicate_message_recipient_pair_is_rejected(
+    database_0004: Path,
+) -> None:
+    command.upgrade(_config_for(database_0004), "head")
+
+    with _enforcing_connection(database_0004) as connection:
+        _insert_notification(connection)
+        connection.commit()
+
+        # Same message and recipient, even with other values: refused.
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_notification(
+                connection,
+                created_at="2026-11-26 11:00:00.000000",
+                read_at="2026-11-26 11:30:00.000000",
+            )
+
+    assert len(_rows(database_0004, "notifications")) == 1
+
+
+def test_0005_valid_notifications_are_accepted_and_cascade(
+    database_0004: Path,
+) -> None:
+    command.upgrade(_config_for(database_0004), "head")
+
+    with _enforcing_connection(database_0004) as connection:
+        # Message 1 (customer 3 on ticket 2) notifies agent 1 and admin 2.
+        _insert_notification(connection)
+        _insert_notification(connection, recipient_user_id=2)
+        # Message 2 (agent 1 on ticket 2) notifies customer 3, already read.
+        _insert_notification(
+            connection,
+            recipient_user_id=3,
+            actor_user_id=1,
+            message_id=2,
+            read_at="2026-11-26 10:30:00.000000",
+        )
+        # Message 3 (agent 1 on ticket 1) notifies customer 3.
+        _insert_notification(
+            connection,
+            recipient_user_id=3,
+            actor_user_id=1,
+            ticket_id=1,
+            message_id=3,
+        )
+        connection.commit()
+
+        # Deleting a message deletes only its notifications.
+        connection.execute("DELETE FROM ticket_messages WHERE id = 1")
+        connection.commit()
+        after_message_delete = connection.execute(
+            "SELECT message_id FROM notifications ORDER BY message_id"
+        ).fetchall()
+
+        # Deleting a ticket deletes its messages and their notifications.
+        connection.execute("DELETE FROM tickets WHERE id = 2")
+        connection.commit()
+        after_ticket_delete = connection.execute(
+            "SELECT ticket_id, message_id FROM notifications"
+        ).fetchall()
+        users = connection.execute("SELECT count(*) FROM users").fetchone()
+
+        # Users referenced by a notification cannot be deleted (no cascade
+        # from notifications to users): user 3 is the remaining recipient,
+        # user 1 the remaining actor.
+        for user_id in (3, 1):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    assert after_message_delete == [(2,), (3,)]
+    assert after_ticket_delete == [(1, 3)]
+    assert users == (3,)
+
+
+def test_0005_downgrade_restores_0004_and_upgrades_again(
+    database_0004: Path,
+) -> None:
+    before = _phase_9_rows(database_0004)
+    config = _config_for(database_0004)
+    reference_0004 = build_reference_schema(MESSAGES_REVISION)
+
+    command.upgrade(config, "head")
+
+    with _enforcing_connection(database_0004) as connection:
+        _insert_notification(connection)
+        _insert_notification(
+            connection, recipient_user_id=3, actor_user_id=1, message_id=2
+        )
+        connection.commit()
+
+    command.downgrade(config, MESSAGES_REVISION)
+
+    assert _current_revision(database_0004) == [MESSAGES_REVISION]
+    assert "notifications" not in _table_names(database_0004)
+    assert _phase_9_rows(database_0004) == before
+    assert compare_schemas(reference_0004, _describe(database_0004)) == []
+
+    with _connect(database_0004) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE 'ix_notifications_%'"
+        ).fetchone() == (0,)
+
+    # Re-upgrading works and starts with an empty notifications table.
+    command.upgrade(config, "head")
+
+    assert _current_revision(database_0004) == [HEAD_REVISION]
+    assert _phase_9_rows(database_0004) == before
+    assert _rows(database_0004, "notifications") == []
+    assert compare_schemas(
+        build_reference_schema("head"), _describe(database_0004)
+    ) == []
+
+    with _connect(database_0004) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_0005_runs_with_foreign_keys_enforced(database_0004: Path) -> None:
+    """The migration does not rely on env.py turning enforcement off."""
+
+    migration = _load_migration_0005()
+    before = _phase_9_rows(database_0004)
+    engine = create_engine(sqlite_url(database_0004))
+
+    @event.listens_for(engine, "connect")
+    def _enforce(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        with engine.begin() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.upgrade()
+
+        with _enforcing_connection(database_0004) as connection:
+            _insert_notification(connection)
+            connection.commit()
+
+        with engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.downgrade()
+    finally:
+        engine.dispose()
+
+    assert _phase_9_rows(database_0004) == before
+    assert "notifications" not in _table_names(database_0004)
+
+    with _connect(database_0004) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_0005_model_check_constraints_match_the_migration() -> None:
+    """The model's named CHECK constraints are the migration's, verbatim.
+
+    Alembic's autogenerate comparison ignores CHECK constraints, so the
+    model and the migration texts are compared directly. The unique
+    constraint and index names are compared too.
+    """
+
+    from sqlalchemy import CheckConstraint, UniqueConstraint
+
+    from app.models import Notification
+
+    migration = _load_migration_0005()
+    source = MIGRATION_0005.read_text(encoding="utf-8")
+
+    assert migration.revision == HEAD_REVISION
+    assert migration.down_revision == MESSAGES_REVISION
+
+    model_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in Notification.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert set(model_checks) == {
+        "ck_notifications_notification_type",
+        "ck_notifications_message_required",
+        "ck_notifications_not_self",
+    }
+
+    for text in model_checks.values():
+        assert f'"{text}"' in source
+
+    [unique] = [
+        constraint
+        for constraint in Notification.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    ]
+
+    assert unique.name == "uq_notifications_message_id_recipient_user_id"
+    assert f'name="{unique.name}"' in source
+    assert {
+        migration.RECIPIENT_INDEX,
+        migration.UNREAD_INDEX,
+        migration.TICKET_INDEX,
+    } == {index.name for index in Notification.__table__.indexes}

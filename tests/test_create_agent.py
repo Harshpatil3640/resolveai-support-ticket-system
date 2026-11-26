@@ -27,7 +27,7 @@ from app.scripts import create_agent as create_agent_module
 from app.services import user_service
 
 
-HEAD_REVISION = "0004"
+HEAD_REVISION = "0005"
 
 AGENT_PASSWORD = "StrongPassword123!"
 

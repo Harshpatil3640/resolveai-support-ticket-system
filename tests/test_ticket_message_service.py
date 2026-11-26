@@ -10,12 +10,12 @@ from datetime import timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import event, func, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.locking import TransactionAlreadyStartedError
-from app.models import Ticket, TicketEvent, TicketMessage, User
+from app.models import Notification, Ticket, TicketEvent, TicketMessage, User
 from app.models.ticket_message import MAX_MESSAGE_LENGTH
 from app.services import ticket_message_service
 from app.services.ticket_message_service import (
@@ -603,3 +603,426 @@ def test_invalid_page_arguments_are_rejected(
             limit=limit,
             before_id=before_id,
         )
+
+
+# ---------------------------------------------------------------------------
+# Notifications (Phase 10): written in the message's transaction
+# ---------------------------------------------------------------------------
+
+
+def _notified(db: Session, message_id: int | None = None) -> list[int]:
+    """Recipient IDs of the stored notifications (of one message), sorted."""
+
+    statement = select(Notification.recipient_user_id).order_by(
+        Notification.recipient_user_id
+    )
+
+    if message_id is not None:
+        statement = statement.where(Notification.message_id == message_id)
+
+    return list(db.scalars(statement))
+
+
+def _set_user(db: Session, user: User, **values) -> None:
+    """Change a user row directly (legacy data, bypassing the workflow)."""
+
+    for name, value in values.items():
+        setattr(user, name, value)
+
+    db.commit()
+
+
+def test_customer_message_notifies_the_assigned_agent(world: SimpleNamespace) -> None:
+    message = _send(world, world.customer, world.assigned)
+
+    assert _notified(world.db, message.id) == [world.agent.id]
+
+
+def test_customer_message_on_unassigned_ticket_notifies_every_active_admin(
+    world: SimpleNamespace,
+    create_user: Callable[..., User],
+) -> None:
+    admin_2 = create_user(email="admin2@example.test", role="admin", name="Abe Admin")
+    retired = create_user(email="admin3@example.test", role="admin", name="Old Admin")
+    _set_user(world.db, retired, is_active=False)
+
+    message = _send(world, world.customer, world.free)
+
+    assert _notified(world.db, message.id) == sorted([world.admin.id, admin_2.id])
+    # Agents are not notified of the unassigned queue.
+    assert world.agent.id not in _notified(world.db)
+    assert world.agent_2.id not in _notified(world.db)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"is_active": False}, {"role": "customer"}, {"role": "Agent"}],
+    ids=["inactive-assignee", "assignee-now-customer", "assignee-legacy-role"],
+)
+def test_customer_message_with_unusable_assignee_falls_back_to_admins(
+    world: SimpleNamespace,
+    change: dict,
+) -> None:
+    # Legacy data: the workflow would have unassigned the ticket.
+    _set_user(world.db, world.agent, **change)
+
+    message = _send(world, world.customer, world.assigned)
+
+    assert _notified(world.db, message.id) == [world.admin.id]
+
+
+def test_assignee_state_is_read_from_the_database_not_the_session(
+    world: SimpleNamespace,
+) -> None:
+    # Changed behind the session's back: its copy of the agent is stale.
+    world.db.execute(
+        text("UPDATE users SET is_active = 0 WHERE id = :id"), {"id": world.agent.id}
+    )
+    world.db.commit()
+
+    message = _send(world, world.customer, world.assigned)
+
+    assert _notified(world.db, message.id) == [world.admin.id]
+
+
+def test_customer_message_with_no_active_admins_is_still_saved(
+    world: SimpleNamespace,
+) -> None:
+    _set_user(world.db, world.admin, is_active=False)
+
+    message = _send(world, world.customer, world.free, "Anyone there?")
+
+    assert world.db.get(TicketMessage, message.id).content == "Anyone there?"
+    assert _count(world.db, Notification) == 0
+
+
+def test_agent_message_notifies_the_customer(world: SimpleNamespace) -> None:
+    message = _send(world, world.agent, world.assigned)
+
+    assert _notified(world.db, message.id) == [world.customer.id]
+
+
+def test_admin_message_notifies_the_customer(world: SimpleNamespace) -> None:
+    message = _send(world, world.admin, world.free)
+
+    assert _notified(world.db, message.id) == [world.customer.id]
+
+
+def test_admin_message_on_assigned_ticket_notifies_customer_and_agent(
+    world: SimpleNamespace,
+) -> None:
+    message = _send(world, world.admin, world.assigned)
+
+    assert _notified(world.db, message.id) == sorted(
+        [world.customer.id, world.agent.id]
+    )
+    # Never the sender.
+    assert world.admin.id not in _notified(world.db)
+
+
+def test_admin_is_never_notified_of_their_own_message(
+    world: SimpleNamespace,
+    create_user: Callable[..., User],
+) -> None:
+    create_user(email="admin2@example.test", role="admin", name="Abe Admin")
+    # A ticket the administrator created themselves.
+    own = Ticket(title="Admin's", description="Created by staff.", creator=world.admin)
+    world.db.add(own)
+    world.db.commit()
+
+    message = _send(world, world.admin, own)
+
+    assert _notified(world.db, message.id) == []
+
+
+def test_staff_created_tickets_have_no_customer_recipient(
+    world: SimpleNamespace,
+) -> None:
+    staff_ticket = Ticket(
+        title="Internal",
+        description="Opened by an agent.",
+        creator=world.agent_2,
+        status="In Progress",
+        assigned_to_user_id=world.agent.id,
+    )
+    world.db.add(staff_ticket)
+    world.db.commit()
+
+    from_agent = _send(world, world.agent, staff_ticket)
+    from_admin = _send(world, world.admin, staff_ticket)
+
+    # The creating agent is not treated as a customer.
+    assert _notified(world.db, from_agent.id) == []
+    assert _notified(world.db, from_admin.id) == [world.agent.id]
+
+
+def test_inactive_creator_is_skipped(world: SimpleNamespace) -> None:
+    _set_user(world.db, world.customer, is_active=False)
+
+    from_agent = _send(world, world.agent, world.assigned)
+    from_admin = _send(world, world.admin, world.assigned)
+
+    assert _notified(world.db, from_agent.id) == []
+    assert _notified(world.db, from_admin.id) == [world.agent.id]
+
+
+def test_inactive_assignee_is_skipped_for_admin_messages(
+    world: SimpleNamespace,
+) -> None:
+    _set_user(world.db, world.agent, is_active=False)
+
+    message = _send(world, world.admin, world.assigned)
+
+    assert _notified(world.db, message.id) == [world.customer.id]
+
+
+def test_sender_role_is_read_inside_the_transaction(world: SimpleNamespace) -> None:
+    # The second agent becomes an administrator; their stale session copy
+    # still says agent. As an administrator they may write and notify.
+    world.db.execute(
+        text("UPDATE users SET role = 'admin' WHERE id = :id"), {"id": world.agent_2.id}
+    )
+    world.db.commit()
+
+    message = _send(world, world.agent_2, world.assigned)
+
+    assert message.sender_role == "admin"
+    assert _notified(world.db, message.id) == sorted(
+        [world.customer.id, world.agent.id]
+    )
+
+
+def test_each_recipient_is_notified_once_per_message(
+    world: SimpleNamespace,
+    create_user: Callable[..., User],
+) -> None:
+    create_user(email="admin2@example.test", role="admin", name="Abe Admin")
+
+    for sender, ticket in [
+        (world.customer, world.assigned),
+        (world.customer, world.free),
+        (world.agent, world.assigned),
+        (world.admin, world.assigned),
+        (world.admin, world.free),
+        (world.customer, world.free),
+    ]:
+        _send(world, sender, ticket)
+
+    pairs = world.db.execute(
+        select(Notification.message_id, Notification.recipient_user_id)
+    ).all()
+
+    assert len(pairs) == len(set(pairs)) == 1 + 2 + 1 + 2 + 1 + 2
+
+
+def test_notification_references_come_from_the_new_message(
+    world: SimpleNamespace,
+) -> None:
+    secret = "Order #A-1002, refund to card ending 4242"
+    view = _send(world, world.admin, world.assigned, secret)
+
+    message = world.db.get(TicketMessage, view.id)
+    notifications = world.db.scalars(select(Notification)).all()
+
+    assert len(notifications) == 2
+
+    for notification in notifications:
+        assert notification.actor_user_id == message.sender_user_id == world.admin.id
+        assert notification.message_id == view.id
+        assert notification.ticket_id == message.ticket_id == world.assigned.id
+        assert notification.created_at == message.created_at
+        assert notification.notification_type == "ticket_message"
+        assert notification.read_at is None
+
+    # The content lives only in the message.
+    rows = world.db.execute(select(*Notification.__table__.columns)).all()
+
+    assert all(secret not in str(value) for row in rows for value in row)
+
+    # And no notification anywhere points at another ticket's message.
+    assert world.db.scalar(
+        select(func.count())
+        .select_from(Notification)
+        .join(TicketMessage, TicketMessage.id == Notification.message_id)
+        .where(Notification.ticket_id != TicketMessage.ticket_id)
+    ) == 0
+
+
+def test_notification_failure_rolls_back_the_message(
+    world: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_helper = ticket_message_service.add_message_notifications
+    seen: dict = {}
+
+    def add_then_fail(db, message, recipient_ids):
+        # The message was flushed: it has an ID, and rows are written.
+        seen["message_id"] = message.id
+        seen["added"] = len(real_helper(db, message, recipient_ids))
+        raise RuntimeError("notification insert failed")
+
+    monkeypatch.setattr(ticket_message_service, "add_message_notifications", add_then_fail)
+
+    with pytest.raises(RuntimeError, match="notification insert failed"):
+        _send(world, world.admin, world.assigned, "Never kept")
+
+    assert seen["message_id"] is not None
+    assert seen["added"] == 2
+    assert _count(world.db, TicketMessage) == 0
+    assert _count(world.db, Notification) == 0
+
+    # The lock was released: the next message (and its notifications) work.
+    monkeypatch.setattr(ticket_message_service, "add_message_notifications", real_helper)
+    kept = _send(world, world.admin, world.assigned, "Kept")
+
+    assert _notified(world.db, kept.id) == sorted([world.customer.id, world.agent.id])
+
+
+def test_database_failure_inserting_notifications_rolls_back_everything(
+    world: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A recipient that does not exist: the notification flush violates
+    # its foreign key.
+    monkeypatch.setattr(
+        ticket_message_service,
+        "resolve_message_recipients",
+        lambda *_args: {world.agent.id, 999_999},
+    )
+
+    with pytest.raises(IntegrityError):
+        _send(world, world.customer, world.assigned)
+
+    assert _count(world.db, TicketMessage) == 0
+    assert _count(world.db, Notification) == 0
+
+
+def test_rollback_failure_is_recorded_on_a_notification_failure(
+    world: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db.errors import rollback_failure_of
+
+    rollback_error = _operational_error()
+    original_rollback = world.db.rollback
+
+    def failing_helper(*_args, **_kwargs):
+        raise RuntimeError("primary failure")
+
+    def failing_rollback():
+        original_rollback()
+        raise rollback_error
+
+    monkeypatch.setattr(ticket_message_service, "add_message_notifications", failing_helper)
+    monkeypatch.setattr(world.db, "rollback", failing_rollback)
+
+    with pytest.raises(RuntimeError, match="primary failure") as error:
+        _send(world, world.customer, world.assigned)
+
+    assert rollback_failure_of(error.value) is rollback_error
+
+    monkeypatch.setattr(world.db, "rollback", original_rollback)
+
+    assert _count(world.db, TicketMessage) == 0
+
+
+def test_message_with_nobody_to_notify_commits_normally(
+    world: SimpleNamespace,
+) -> None:
+    # The creator is staff and nobody is assigned: no recipients at all.
+    staff_ticket = Ticket(title="Internal", description="Staff only.", creator=world.admin)
+    world.db.add(staff_ticket)
+    world.db.commit()
+
+    view = _send(world, world.admin, staff_ticket, "Note to self")
+
+    assert world.db.get(TicketMessage, view.id).content == "Note to self"
+    assert _count(world.db, Notification) == 0
+
+
+def test_message_result_is_unchanged(world: SimpleNamespace) -> None:
+    from dataclasses import fields
+
+    from app.services.ticket_message_service import TicketMessageView
+
+    view = _send(world, world.customer, world.assigned, "Hello")
+
+    assert [field.name for field in fields(TicketMessageView)] == [
+        "id",
+        "ticket_id",
+        "sender_user_id",
+        "sender_name",
+        "sender_role",
+        "content",
+        "created_at",
+    ]
+    assert (view.ticket_id, view.sender_user_id, view.sender_name, view.sender_role) == (
+        world.assigned.id,
+        world.customer.id,
+        "Cara Customer",
+        "customer",
+    )
+    assert view.content == "Hello"
+    assert view.created_at.tzinfo is timezone.utc
+
+
+def test_notifying_never_changes_the_ticket_or_its_history(
+    world: SimpleNamespace,
+) -> None:
+    before = (
+        world.assigned.version,
+        world.assigned.status,
+        world.assigned.assigned_to_user_id,
+        world.assigned.updated_at,
+    )
+    events_before = _count(world.db, TicketEvent)
+
+    _send(world, world.customer, world.assigned)
+    _send(world, world.admin, world.assigned)
+    world.db.refresh(world.assigned)
+
+    assert _count(world.db, Notification) == 3
+    assert (
+        world.assigned.version,
+        world.assigned.status,
+        world.assigned.assigned_to_user_id,
+        world.assigned.updated_at,
+    ) == before
+    assert _count(world.db, TicketEvent) == events_before
+
+
+def test_only_the_actor_and_ticket_rows_are_locked(world: SimpleNamespace) -> None:
+    """Recipient reads take no row locks (the global lock order is kept).
+
+    SQLite never renders FOR UPDATE, so the ORM statements themselves are
+    inspected: exactly two locking reads (actor, then ticket), and every
+    read after them, including the active administrator IDs, is plain.
+    """
+
+    statements: list[tuple[str, bool]] = []
+
+    @event.listens_for(world.db, "do_orm_execute")
+    def record(state) -> None:
+        if state.is_select:
+            entity = state.statement.column_descriptions[0]["entity"]
+            locking = state.statement._for_update_arg is not None
+            statements.append((getattr(entity, "__name__", str(entity)), locking))
+
+    try:
+        _send(world, world.customer, world.free)
+    finally:
+        event.remove(world.db, "do_orm_execute", record)
+
+    locking = [entity for entity, locks in statements if locks]
+
+    # (Unlocked reads before the lock are the test's own expired objects
+    # being refreshed.)
+    assert locking == ["User", "Ticket"]
+
+    after_ticket_lock = statements[statements.index(("Ticket", True)) + 1 :]
+
+    # The recipient context (creator and active administrators) is read
+    # after the ticket lock, and unlocked.
+    assert after_ticket_lock.count(("User", False)) >= 2
+    assert all(not locks for _entity, locks in after_ticket_lock)
+    assert _notified(world.db) == [world.admin.id]
