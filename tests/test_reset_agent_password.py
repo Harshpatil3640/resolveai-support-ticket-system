@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session

@@ -43,7 +43,6 @@ from app.services import user_service
 from app.services.auth_service import UserNotFoundError
 from app.services.user_service import (
     AdministratorRequiredError,
-    InvalidUserDataError,
     LastActiveAdministratorError,
     SelfModificationError,
     TransactionAlreadyStartedError,

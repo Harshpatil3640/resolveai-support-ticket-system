@@ -1,0 +1,92 @@
+# Continuous integration: lint, test with coverage, and audit dependencies.
+#
+# Runs only on standard GitHub-hosted ubuntu-latest runners (free for public
+# repositories). No secrets, caches, artifacts, uploads or deployments.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+    branches:
+      - main
+
+# Read-only token; no step needs to write to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the older run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, test and audit (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Runtime and test dependencies come from the pinned requirements.txt;
+      # CI-only tools (pytest-cov, Ruff, pip-audit) from requirements-ci.txt.
+      # Both files are resolved together, so installing the tools can never
+      # change a pinned runtime version (pip fails instead).
+      - name: Install dependencies
+        id: install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-ci.txt
+          python -m pip check
+
+      # The developer .env and resolveai.db are git-ignored, so a fresh
+      # checkout has neither. Fail loudly if that ever changes.
+      - name: Confirm no local configuration or database is present
+        run: |
+          test ! -e .env
+          test ! -e resolveai.db
+
+      # Each check below runs even if an earlier one failed, so one run
+      # reports every problem; the job still fails if any of them fails.
+      # Rule selection comes from ruff.toml at the repository root.
+      - name: Lint with Ruff
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: ruff check app tests
+
+      - name: Run tests with coverage
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          APP_ENV: test
+          # Disposable database in the runner's temporary directory, never
+          # the repository's resolveai.db.
+          DATABASE_URL: sqlite:///${{ runner.temp }}/resolveai-ci.db
+        run: |
+          # A random, CI-only signing key generated for this run. It is
+          # never written to the log and is not a secret of any deployment.
+          SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          export SECRET_KEY
+          python -m pytest --cov=app --cov-report=term-missing
+
+      - name: Confirm the tests left no project database behind
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: test ! -e resolveai.db
+
+      - name: Audit runtime dependencies with pip-audit
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pip-audit -r requirements.txt
+
+      - name: Audit CI tool dependencies with pip-audit
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pip-audit -r requirements-ci.txt
