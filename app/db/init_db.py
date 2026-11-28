@@ -20,4 +20,8 @@ if __name__ == "__main__":
     create_tables()
 
     print("Database initialized successfully.")
-    print(f"Database location: {DATABASE_FILE}")
+    if DATABASE_FILE is not None:
+        print(f"Database location: {DATABASE_FILE}")
+    else:
+        # The URL is not printed: it may contain a password.
+        print("Database location: the configured DATABASE_URL.")

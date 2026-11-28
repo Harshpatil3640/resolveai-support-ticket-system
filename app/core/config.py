@@ -1,40 +1,46 @@
+"""Validated application configuration, loaded once at import time.
+
+Settings are parsed by ``app.core.settings`` (see its documentation for
+every variable). Importing this module loads the project ``.env`` file and
+raises ``ConfigurationError`` (a ``RuntimeError``) if any setting is
+missing or invalid, so the application fails at start-up instead of
+running with an unsafe configuration.
+
+The module-level names below are kept for existing imports.
+"""
 
 import os
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-
-# Locate the project root directory.
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-# Load environment variables from the project root.
-load_dotenv(PROJECT_ROOT / ".env")
+from app.core.settings import (
+    PROJECT_ROOT,
+    ConfigurationError,
+    Settings,
+    load_environment,
+    load_settings,
+)
 
 
-# Load the JWT secret.
-SECRET_KEY = os.getenv("SECRET_KEY")
+# Load environment variables from the project root (never overriding
+# variables already set in the real environment).
+load_environment()
 
-if not SECRET_KEY or len(SECRET_KEY) < 32:
-    raise RuntimeError(
-        "SECRET_KEY is missing or too short. "
-        "Configure it in the project .env file."
-    )
+# Every validated setting.
+settings: Settings = load_settings(os.environ)
 
 
 # JWT configuration.
+SECRET_KEY = settings.secret_key
+
 ALGORITHM = "HS256"
 
-try:
-    ACCESS_TOKEN_EXPIRE_MINUTES = int(
-        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
-    )
-except ValueError as exc:
-    raise RuntimeError(
-        "ACCESS_TOKEN_EXPIRE_MINUTES must be an integer."
-    ) from exc
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
 
-if ACCESS_TOKEN_EXPIRE_MINUTES <= 0:
-    raise RuntimeError(
-        "ACCESS_TOKEN_EXPIRE_MINUTES must be positive."
-    )
+
+__all__ = [
+    "ACCESS_TOKEN_EXPIRE_MINUTES",
+    "ALGORITHM",
+    "PROJECT_ROOT",
+    "SECRET_KEY",
+    "ConfigurationError",
+    "settings",
+]
