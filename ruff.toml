@@ -1,0 +1,18 @@
+# Ruff configuration for the ResolveAI CI lint step (`ruff check app tests`).
+#
+# This is the initial CI lint baseline. It deliberately selects only the rule
+# groups that catch real defects:
+#   E4, E7, E9  pycodestyle errors: imports, statements, syntax/runtime errors
+#   F           Pyflakes: undefined names, unused imports/variables, etc.
+#
+# Ruff's full default selection currently reports about 212 existing style and
+# modernisation findings across the repository. Those are left for a future,
+# dedicated cleanup, after which this selection can be expanded rule group by
+# rule group. Prefer expanding the selection over adding per-line `noqa`
+# comments or per-file ignores.
+
+target-version = "py312"
+line-length = 88
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

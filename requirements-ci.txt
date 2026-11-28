@@ -1,0 +1,6 @@
+# Tools used only by the CI workflow (.github/workflows/ci.yml).
+# Installed together with requirements.txt so pip resolves both sets at once.
+# Kept in a file so Dependabot can propose updates for these pins too.
+pytest-cov==7.1.0
+ruff==0.17.6
+pip-audit==2.10.1

@@ -573,19 +573,31 @@ def test_check_baseline_requires_database_for_non_sqlite_configuration(
 # ---------------------------------------------------------------------------
 
 
-def _subprocess_environ(database_url: str) -> dict[str, str]:
+def _subprocess_environ(database_url: str, **overrides: str) -> dict[str, str]:
+    """The test run's environment with ``DATABASE_URL`` and ``overrides``.
+
+    A variable set to ``""`` means "use the default": the settings treat
+    a blank value as unset, and ``load_dotenv`` never overrides a variable
+    that is already present, so the project .env cannot supply one either.
+    """
+
     environ = dict(os.environ)
     environ["DATABASE_URL"] = database_url
     environ["PYTHONIOENCODING"] = "utf-8"
+    environ.update(overrides)
 
     return environ
 
 
-def _run(args: list[str], database_url: str) -> subprocess.CompletedProcess:
+def _run(
+    args: list[str],
+    database_url: str,
+    **overrides: str,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, *args],
         cwd=PROJECT_ROOT,
-        env=_subprocess_environ(database_url),
+        env=_subprocess_environ(database_url, **overrides),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -651,4 +663,57 @@ def test_alembic_x_db_url_still_overrides_database_url(tmp_path: Path) -> None:
     assert upgrade.returncode == 0, upgrade.stderr
     assert _recorded_revisions(override_file) == [HEAD_REVISION]
     assert not configured_file.exists()
+    assert _sha256(APPLICATION_DATABASE) == before
+
+
+# ---------------------------------------------------------------------------
+# Defaults of a fresh process, whatever this test run configures
+# ---------------------------------------------------------------------------
+# The in-process tests above skip themselves when the test run sets
+# DATABASE_URL, APP_ENV or ENABLE_API_DOCS (as CI does). These check the
+# same defaults in a fresh interpreter with those variables blanked, so they
+# run everywhere.
+
+
+def test_fresh_process_uses_the_default_file_without_database_url() -> None:
+    before = _sha256(APPLICATION_DATABASE)
+
+    result = _run(
+        [
+            "-c",
+            (
+                "from app.core.settings import resolve_database_url; "
+                "from app.db.database import DATABASE_FILE, DATABASE_URL; "
+                "print(DATABASE_FILE); "
+                "print(DATABASE_URL == resolve_database_url({}))"
+            ),
+        ],
+        "",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [str(DEFAULT_DATABASE_FILE), "True"]
+    assert _sha256(APPLICATION_DATABASE) == before  # never opened or created
+
+
+def test_fresh_process_serves_documentation_by_default(tmp_path: Path) -> None:
+    database_file = tmp_path / "unused.db"
+    before = _sha256(APPLICATION_DATABASE)
+
+    result = _run(
+        [
+            "-c",
+            (
+                "from app.main import app; "
+                "print(app.docs_url); print(app.redoc_url); print(app.openapi_url)"
+            ),
+        ],
+        f"sqlite:///{database_file.as_posix()}",
+        APP_ENV="",
+        ENABLE_API_DOCS="",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert tuple(result.stdout.splitlines()) == DOC_PATHS
+    assert not database_file.exists()
     assert _sha256(APPLICATION_DATABASE) == before
