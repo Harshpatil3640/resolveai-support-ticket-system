@@ -36,7 +36,12 @@ def get_database_url() -> str:
 
     Precedence: ``alembic -x db_url=...`` (e.g. to rehearse on a backup
     copy), then a programmatically set ``sqlalchemy.url``, then the
-    application's DATABASE_URL.
+    application's ``app.db.database.DATABASE_URL``. That last one is
+    resolved by ``app.core.settings.resolve_database_url`` from the
+    ``DATABASE_URL`` environment variable (or ``.env``), falling back to
+    ``resolveai.db`` in the project root, exactly as for the application,
+    so both use the same database by default. ``SECRET_KEY`` is not needed
+    to run migrations.
     """
 
     cli_url = context.get_x_argument(as_dictionary=True).get("db_url")

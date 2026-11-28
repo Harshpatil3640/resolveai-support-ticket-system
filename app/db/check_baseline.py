@@ -179,6 +179,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.database is None:
+        # DATABASE_URL is not a SQLite file; never fall back to resolveai.db.
+        parser.error(
+            "the configured DATABASE_URL is not a SQLite database file; "
+            "pass --database PATH."
+        )
+
     # SQLAlchemy's own pool log records are sanitised for the whole run.
     with sanitised_database_logs():
         return _run(args.database, stamp=args.stamp)

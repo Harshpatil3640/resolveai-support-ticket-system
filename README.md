@@ -108,9 +108,10 @@ resolveai-support-ticket-system/
 │   │
 │   ├── core/
 │   │   ├── audit_logging.py       # resolveai.audit logger and record helpers
-│   │   ├── config.py
+│   │   ├── config.py              # validated settings, loaded at start-up
 │   │   ├── roles.py               # admin, agent, customer
-│   │   └── security.py            # password hashing and JWTs
+│   │   ├── security.py            # password hashing and JWTs
+│   │   └── settings.py            # environment variable parsing and validation
 │   │
 │   ├── db/
 │   │   ├── database.py            # engine and sessions
@@ -682,6 +683,11 @@ The generated model is required by the FastAPI predictor.
 
 ### 8. Run the FastAPI application
 
+Configure `.env` first (see [Configuration](#configuration)); at minimum
+`SECRET_KEY` must be set.
+
+**Development** (auto-reload on code changes, API documentation enabled):
+
 ```cmd
 python -m uvicorn app.main:app --reload
 ```
@@ -694,6 +700,68 @@ Authenticate with an account created as described in
 [Creating the First Administrator](#creating-the-first-administrator), then use
 the protected endpoints. The web frontend is served at
 http://127.0.0.1:8000/ (sign in, then the role-specific dashboard opens).
+
+**Production-style local run** (no auto-reload, one worker process):
+
+```cmd
+set APP_ENV=production
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+(PowerShell: `$env:APP_ENV = "production"`; or set `APP_ENV=production` in
+`.env`.) With `APP_ENV=production`, `/docs`, `/redoc` and `/openapi.json`
+are disabled unless `ENABLE_API_DOCS=true`. `--host 0.0.0.0` listens on every
+network interface, so other machines on the network can reach the server;
+use `--host 127.0.0.1` to keep it local. `--reload` must not be used in
+production: it watches the source tree and restarts the server on changes.
+
+**Why one worker with SQLite:** SQLite allows only one writer at a time for
+the whole database file. ResolveAI's protected changes (for example "at least
+one active administrator must remain", ticket claims and assignments) take
+that write lock with `BEGIN IMMEDIATE` (`app/db/locking.py`). Within one
+worker process, concurrent requests simply wait for the lock. With several
+worker processes they also compete for it across processes, so under load
+requests wait up to SQLite's busy timeout and then fail with "database is
+locked". One worker already serves requests concurrently on its thread pool,
+which is plenty for this application. More workers would only make sense
+with a client/server database, and ResolveAI does not support one yet.
+
+The application never migrates the database at start-up. Apply migrations
+explicitly with `alembic upgrade head` (see
+[Database Setup and Migrations](#database-setup-and-migrations)).
+
+## Configuration
+
+Settings are read from environment variables, or from the git-ignored `.env`
+file in the project root. Variables set in the real environment take
+precedence over `.env`. `.env.example` lists every variable; copy it to `.env`
+and fill in `SECRET_KEY`. All settings are validated at start-up
+(`app/core/settings.py`). An invalid value stops the application with a
+message that names the variable but never shows its value.
+
+| Variable | Default | Accepted values |
+|---|---|---|
+| `SECRET_KEY` | *(required)* | At least 32 characters. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Integer from 1 to 525600 (one year). |
+| `APP_ENV` | `development` | `development`, `test` or `production` (not case-sensitive). |
+| `DATABASE_URL` | `resolveai.db` in the project root | A SQLAlchemy URL. A relative SQLite path such as `sqlite:///data/resolveai.db` is resolved against the project root. |
+| `ENABLE_API_DOCS` | enabled in development and test, disabled in production | `true` or `false` (also `1`/`0`, `yes`/`no`, `on`/`off`). |
+| `LOG_FORMAT` | `text` | `text` or `json`. Reserved; not applied yet. |
+| `LOGIN_RATE_LIMIT_MAX_ATTEMPTS` | `5` | Integer from 1 to 1000. Reserved; rate limiting is not enforced yet. |
+| `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `300` | Integer from 1 to 86400. Reserved; rate limiting is not enforced yet. |
+
+An empty value means "use the default", except for `SECRET_KEY`, which must be
+set.
+
+**`DATABASE_URL`.** The application and Alembic resolve the same URL, so
+`alembic upgrade head` migrates the database the application uses.
+`alembic -x db_url=...` still overrides it for a single command (for example
+to rehearse a migration on a copy). Migrations do not need `SECRET_KEY`.
+Making the URL configurable does **not** mean other databases are supported:
+ResolveAI currently supports **SQLite only**. The migration checks, the
+provisioning scripts and the concurrency handling are SQLite-specific, and no
+PostgreSQL driver is installed. The URL is never printed, because it may
+contain a password.
 
 ## Database Setup and Migrations
 
@@ -1345,7 +1413,10 @@ All tests use in-memory or temporary SQLite databases and never touch
 `resolveai.db`. The audit tests start fresh Python interpreters to
 apply real logging configurations, so they take longer than the others.
 As for running the application, `SECRET_KEY` (at least 32 characters) must be
-set, normally in `.env` (see `.env.example`).
+set, normally in `.env` (see `.env.example` and [Configuration](#configuration)).
+The configuration tests (`tests/test_configuration.py`) check settings on
+explicit values, so they do not depend on your `.env`. Their Alembic checks
+run against temporary SQLite files only.
 
 To run the application locally, follow
 [8. Run the FastAPI application](#8-run-the-fastapi-application):
