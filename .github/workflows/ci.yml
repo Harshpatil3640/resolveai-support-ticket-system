@@ -77,7 +77,7 @@ jobs:
           # never written to the log and is not a secret of any deployment.
           SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
           export SECRET_KEY
-          pytest --cov=app --cov-report=term-missing
+          python -m pytest --cov=app --cov-report=term-missing
 
       - name: Confirm the tests left no project database behind
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
